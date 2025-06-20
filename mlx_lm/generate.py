@@ -308,6 +308,7 @@ def generate_step(
     quantized_kv_start: int = 0,
     prompt_progress_callback: Optional[Callable[int, int]] = None,
     input_embeddings: Optional[mx.array] = None,
+    **kwargs,
 ) -> Generator[Tuple[mx.array, mx.array], None, None]:
     """
     A generator producing token ids based on the given prompt from the model.
@@ -384,7 +385,6 @@ def generate_step(
 
     def _step(input_tokens: mx.array, input_embeddings: Optional[mx.array] = None):
         nonlocal tokens
-
         with mx.stream(generation_stream):
             logits = _model_call(
                 input_tokens=input_tokens[None],
@@ -656,6 +656,22 @@ def stream_generate(
         GenerationResponse: An instance containing the generated text segment and
             associated metadata. See :class:`GenerationResponse` for details.
     """
+    processor = kwargs.pop("processor", None)
+    if processor and hasattr(processor, "image_processor"):
+        images = kwargs.pop("images", None)
+        if images is not None:
+            processed = processor(
+                text=prompt,
+                images=images,
+                return_tensors="np",
+            )
+            for k, v in processed.items():
+                if k == "input_ids":
+                    prompt = mx.array(processed.input_ids[0])
+                else:
+                    kwargs[k] = mx.array(v)
+            kwargs["pixel_values"] = mx.array(processed.pixel_values)
+
     if not isinstance(tokenizer, TokenizerWrapper):
         tokenizer = TokenizerWrapper(tokenizer)
 
