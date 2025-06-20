@@ -35,8 +35,10 @@ else:
 
 from mlx.utils import tree_flatten, tree_map, tree_reduce
 from transformers import PreTrainedTokenizer
+from transformers.processing_utils import ProcessorMixin
 
 # Local imports
+from .processor_utils import load_processor
 from .tokenizer_utils import TokenizerWrapper, load_tokenizer
 from .tuner.utils import dequantize as dequantize_model
 from .tuner.utils import get_total_parameters, load_adapters
@@ -245,6 +247,9 @@ def load(
     tokenizer = load_tokenizer(
         model_path, tokenizer_config, eos_token_ids=config.get("eos_token_id", None)
     )
+    processor = load_processor(model_path)
+    if isinstance(processor, ProcessorMixin):
+        return model, tokenizer, processor
 
     return model, tokenizer
 

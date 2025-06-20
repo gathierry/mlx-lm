@@ -25,10 +25,12 @@ from typing import (
 
 import mlx.core as mx
 from huggingface_hub import scan_cache_dir
+from transformers.processing_utils import ProcessorMixin
 
 from ._version import __version__
 from .generate import stream_generate
 from .models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
+from .processor_utils import process_vision_info
 from .sample_utils import make_logits_processors, make_sampler
 from .utils import common_prefix_len, load
 
@@ -138,8 +140,9 @@ def process_message_content(messages):
             text_fragments = [
                 fragment["text"] for fragment in content if fragment["type"] == "text"
             ]
-            if len(text_fragments) != len(content):
-                raise ValueError("Only 'text' content type is supported.")
+            # comment this out as we are adding image
+            # if len(text_fragments) != len(content):
+            #     raise ValueError("Only 'text' content type is supported.")
             message["content"] = "".join(text_fragments)
         elif content is None:
             message["content"] = ""
@@ -175,7 +178,7 @@ class ModelProvider:
     # Added in adapter_path to load dynamically
     def load(self, model_path, adapter_path=None, draft_model_path=None):
         if self.model_key == (model_path, adapter_path, draft_model_path):
-            return self.model, self.tokenizer
+            return self.model, self.tokenizer, self.processor
 
         # Remove the old model if it exists.
         self.model = None
@@ -196,7 +199,7 @@ class ModelProvider:
                     "A model path has to be given as a CLI "
                     "argument or in the HTTP request"
                 )
-            model, tokenizer = load(
+            loaded = load(
                 self.cli_args.model,
                 adapter_path=(
                     adapter_path if adapter_path else self.cli_args.adapter_path
@@ -205,9 +208,14 @@ class ModelProvider:
             )
         else:
             self._validate_model_path(model_path)
-            model, tokenizer = load(
+            loaded = load(
                 model_path, adapter_path=adapter_path, tokenizer_config=tokenizer_config
             )
+        if len(loaded) == 3:
+            model, tokenizer, processor = loaded
+        else:
+            model, tokenizer = loaded
+            processor = None
 
         if self.cli_args.use_default_chat_template:
             if tokenizer.chat_template is None:
@@ -216,6 +224,7 @@ class ModelProvider:
         self.model_key = (model_path, adapter_path, draft_model_path)
         self.model = model
         self.tokenizer = tokenizer
+        self.processor = processor
 
         def validate_draft_tokenizer(draft_tokenizer):
             # Check if tokenizers are compatible
@@ -237,7 +246,7 @@ class ModelProvider:
             self._validate_model_path(draft_model_path)
             self.draft_model, draft_tokenizer = load(draft_model_path)
             validate_draft_tokenizer(draft_tokenizer)
-        return self.model, self.tokenizer
+        return self.model, self.tokenizer, self.processor
 
 
 class APIHandler(BaseHTTPRequestHandler):
@@ -333,7 +342,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.validate_model_parameters()
         # Load the model if needed
         try:
-            self.model, self.tokenizer = self.model_provider.load(
+            self.model, self.tokenizer, self.processor = self.model_provider.load(
                 self.requested_model,
                 self.adapter,
                 self.requested_draft_model,
@@ -361,8 +370,8 @@ class APIHandler(BaseHTTPRequestHandler):
         )
 
         # Call endpoint specific method
-        prompt = endpoints[self.path]()
-        self.handle_completion(prompt, stop_id_sequences)
+        prompt, images = endpoints[self.path]()
+        self.handle_completion(prompt, stop_id_sequences, images=images)
 
     def validate_model_parameters(self):
         """
@@ -596,8 +605,9 @@ class APIHandler(BaseHTTPRequestHandler):
 
     def handle_completion(
         self,
-        prompt: List[int],
+        prompt: Union[List[int], str],
         stop_id_sequences: List[List[int]],
+        images = None,
     ):
         """
         Generate a response to a prompt and send it to the client in a single batch.
@@ -650,6 +660,8 @@ class APIHandler(BaseHTTPRequestHandler):
             prompt_cache=self.prompt_cache.cache,
             draft_model=self.model_provider.draft_model,
             num_draft_tokens=self.num_draft_tokens,
+            processor=self.processor,
+            images=images,
         ):
             segment = gen_response.text
             text += segment
@@ -750,7 +762,7 @@ class APIHandler(BaseHTTPRequestHandler):
         }
         return response
 
-    def handle_chat_completions(self) -> List[int]:
+    def handle_chat_completions(self) -> Union[List[int], str]:
         """
         Handle a chat completion request.
 
@@ -763,20 +775,23 @@ class APIHandler(BaseHTTPRequestHandler):
         # Determine response type
         self.request_id = f"chatcmpl-{uuid.uuid4()}"
         self.object_type = "chat.completion.chunk" if self.stream else "chat.completion"
-        if self.tokenizer.chat_template:
-            messages = body["messages"]
-            process_message_content(messages)
-            prompt = self.tokenizer.apply_chat_template(
-                messages,
-                body.get("tools") or None,
-                add_generation_prompt=True,
-                **self.model_provider.cli_args.chat_template_args,
-            )
+        messages = body["messages"]
+        images = process_vision_info(messages[-1:])  # only process last message
+        if isinstance(self.processor, ProcessorMixin):
+            prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True)
         else:
-            prompt = convert_chat(body["messages"], body.get("role_mapping"))
-            prompt = self.tokenizer.encode(prompt)
-
-        return prompt
+            if self.tokenizer.chat_template:
+                process_message_content(messages)
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    body.get("tools") or None,
+                    add_generation_prompt=True,
+                    **self.model_provider.cli_args.chat_template_args,
+                )
+            else:
+                prompt = convert_chat(messages, body.get("role_mapping"))
+                prompt = self.tokenizer.encode(prompt)
+        return prompt, images
 
     def handle_text_completions(self) -> List[int]:
         """
@@ -789,7 +804,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.request_id = f"cmpl-{uuid.uuid4()}"
         self.object_type = "text_completion"
         assert "prompt" in self.body, "Request did not contain a prompt"
-        return self.tokenizer.encode(self.body["prompt"])
+        return self.tokenizer.encode(self.body["prompt"]), None
 
     def do_GET(self):
         """

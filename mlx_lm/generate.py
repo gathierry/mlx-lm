@@ -297,6 +297,7 @@ def generate_step(
     quantized_kv_start: int = 0,
     prompt_progress_callback: Optional[Callable[int, int]] = None,
     input_embeddings: Optional[mx.array] = None,
+    **kwargs,
 ) -> Generator[Tuple[mx.array, mx.array], None, None]:
     """
     A generator producing token ids based on the given prompt from the model.
@@ -357,17 +358,16 @@ def generate_step(
 
     sampler = sampler or (lambda x: mx.argmax(x, axis=-1))
 
-    def _model_call(y):
+    def _model_call(y, **kwargs):
         if y.ndim == 3:
-            return model(None, cache=prompt_cache, input_embeddings=y)
+            return model(None, cache=prompt_cache, input_embeddings=y, **kwargs)
         else:
-            return model(y, cache=prompt_cache)
+            return model(y, cache=prompt_cache, **kwargs)
 
-    def _step(y):
+    def _step(y, **kwargs):
         nonlocal tokens
-
         with mx.stream(generation_stream):
-            logits = _model_call(y[None])
+            logits = _model_call(y[None], **kwargs)
 
             logits = logits[:, -1, :]
 
@@ -396,8 +396,7 @@ def generate_step(
             prompt_processed_tokens += prefill_step_size
             y = y[prefill_step_size:]
             mx.clear_cache()
-
-        y, logprobs = _step(y)
+        y, logprobs = _step(y, **kwargs)
 
     mx.async_eval(y, logprobs)
     n = 0
@@ -617,6 +616,22 @@ def stream_generate(
         GenerationResponse: An instance containing the generated text segment and
             associated metadata. See :class:`GenerationResponse` for details.
     """
+    processor = kwargs.pop("processor", None)
+    if processor and hasattr(processor, "image_processor"):
+        images = kwargs.pop("images", None)
+        if images is not None:
+            processed = processor(
+                text=prompt,
+                images=images,
+                return_tensors="np",
+            )
+            for k, v in processed.items():
+                if k == "input_ids":
+                    prompt = mx.array(processed.input_ids[0])
+                else:
+                    kwargs[k] = mx.array(v)
+            kwargs["pixel_values"] = mx.array(processed.pixel_values)
+
     if not isinstance(tokenizer, TokenizerWrapper):
         tokenizer = TokenizerWrapper(tokenizer)
 
