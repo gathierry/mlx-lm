@@ -171,6 +171,7 @@ class Model(nn.Module):
         mask: mx.array = None,
         cache=None,
         input_embeddings: Optional[mx.array] = None,
+        **kwargs,
     ):
         out = self.model(inputs, mask, cache, input_embeddings)
         if self.args.tie_word_embeddings:

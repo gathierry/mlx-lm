@@ -659,7 +659,7 @@ def stream_generate(
     processor = kwargs.pop("processor", None)
     if processor and hasattr(processor, "image_processor"):
         images = kwargs.pop("images", None)
-        if images is not None:
+        if images:
             processed = processor(
                 text=prompt,
                 images=images,

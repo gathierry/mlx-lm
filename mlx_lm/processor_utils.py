@@ -150,7 +150,7 @@ def fetch_image(
 
 def process_vision_info(
     conversations: list[dict] | list[list[dict]],
-) -> list[Image.Image] | None:
+) -> list[Image.Image]:
 
     vision_infos = extract_vision_info(conversations)
     ## Read images
@@ -160,8 +160,6 @@ def process_vision_info(
             image_inputs.append(fetch_image(vision_info))
         else:
             raise ValueError("image, image_url should in content.")
-    if len(image_inputs) == 0:
-        image_inputs = None
     return image_inputs
 
 
