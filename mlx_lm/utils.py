@@ -22,6 +22,7 @@ from typing import (
 
 import mlx.core as mx
 import mlx.nn as nn
+from PIL.Image import Image
 
 if os.getenv("MLXLM_USE_MODELSCOPE", "False").lower() == "true":
     try:
@@ -528,6 +529,14 @@ def save(
         create_model_card(dst_path, hf_repo)
 
 
+def images_equal_bytes(img1: Image, img2: Image) -> bool:
+    return (
+        img1.mode == img2.mode and
+        img1.size == img2.size and
+        img1.tobytes() == img2.tobytes()
+    )
+
+
 def common_prefix_len(list1, list2):
     """
     Calculates the length of the common prefix of two lists.
@@ -545,6 +554,10 @@ def common_prefix_len(list1, list2):
 
     # Iterate up to the length of the shorter list
     for i in range(min_len):
+        if isinstance(list1[i], Image) and isinstance(list2[i], Image):
+            if images_equal_bytes(list1[i], list2[i]):
+                return i
+
         if list1[i] != list2[i]:
             # Mismatch found, the common prefix length is the current index
             return i

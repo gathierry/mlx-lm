@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     List,
@@ -33,6 +34,9 @@ from .models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_
 from .processor_utils import process_vision_info
 from .sample_utils import make_logits_processors, make_sampler
 from .utils import common_prefix_len, load
+
+if TYPE_CHECKING:
+    from PIL.Image import Image
 
 
 def get_system_fingerprint():
@@ -153,6 +157,7 @@ class PromptCache:
     cache: List[Any] = field(default_factory=list)
     model_key: Tuple[str, Optional[str]] = ("", None, None)
     tokens: List[int] = field(default_factory=list)
+    images: List["Image"] = field(default_factory=list)
 
 
 class ModelProvider:
@@ -520,7 +525,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
         return response
 
-    def reset_prompt_cache(self, prompt):
+    def reset_prompt_cache(self, prompt, images=None):
         """Resets the prompt cache and associated state.
 
         Args:
@@ -535,8 +540,9 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.model_provider.draft_model
             )
         self.prompt_cache.tokens = list(prompt)  # Cache the new prompt fully
+        self.prompt_cache.images = images if images else []
 
-    def get_prompt_cache(self, prompt):
+    def get_prompt_cache(self, prompt, images):
         """
         Determines the portion of the prompt that needs processing by comparing
         it to the cached prompt and attempting to reuse the common prefix.
@@ -548,6 +554,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
         Args:
             prompt (List[int]): The tokenized new prompt.
+            images (Optional[List[Image]]): Image inputs.
 
         Returns:
             List[int]: The suffix of the prompt that actually needs to be processed
@@ -557,6 +564,8 @@ class APIHandler(BaseHTTPRequestHandler):
         cache_len = len(self.prompt_cache.tokens)
         prompt_len = len(prompt)
         com_prefix_len = common_prefix_len(self.prompt_cache.tokens, prompt)
+
+        com_prefix_len_img = common_prefix_len(self.prompt_cache.images, images)
 
         # Leave at least one token in the prompt
         com_prefix_len = min(com_prefix_len, len(prompt) - 1)
@@ -575,6 +584,9 @@ class APIHandler(BaseHTTPRequestHandler):
             )
             prompt = prompt[com_prefix_len:]
             self.prompt_cache.tokens.extend(prompt)
+            if images:
+                images = images[com_prefix_len_img:]
+                self.prompt_cache.images.extend(images)
 
         # Condition 3: Common prefix exists but is shorter than cache length. Attempt trim.
         elif com_prefix_len < cache_len:
@@ -582,16 +594,17 @@ class APIHandler(BaseHTTPRequestHandler):
                 f"*** Common prefix ({com_prefix_len}) shorter than cache ({cache_len}). Attempting trim. ***"
             )
 
-            if can_trim_prompt_cache(self.prompt_cache.cache):
-                num_to_trim = cache_len - com_prefix_len
-                logging.debug(f"    Trimming {num_to_trim} tokens from cache.")
-                trim_prompt_cache(self.prompt_cache.cache, num_to_trim)
-                self.prompt_cache.tokens = self.prompt_cache.tokens[:com_prefix_len]
-                prompt = prompt[com_prefix_len:]
-                self.prompt_cache.tokens.extend(prompt)
-            else:
-                logging.debug(f"    Cache cannot be trimmed. Resetting cache.")
-                self.reset_prompt_cache(prompt)
+            # if can_trim_prompt_cache(self.prompt_cache.cache):
+            #     num_to_trim = cache_len - com_prefix_len
+            #     logging.debug(f"    Trimming {num_to_trim} tokens from cache.")
+            #     trim_prompt_cache(self.prompt_cache.cache, num_to_trim)
+            #     self.prompt_cache.tokens = self.prompt_cache.tokens[:com_prefix_len]
+            #     prompt = prompt[com_prefix_len:]
+            #     self.prompt_cache.tokens.extend(prompt)
+            # else:
+            #     logging.debug(f"    Cache cannot be trimmed. Resetting cache.")
+            #    self.reset_prompt_cache(prompt)
+            self.reset_prompt_cache(prompt)
 
         # This case should logically not be reached if com_prefix_len <= cache_len
         else:
@@ -601,13 +614,13 @@ class APIHandler(BaseHTTPRequestHandler):
             self.reset_prompt_cache(prompt)
 
         logging.debug(f"Returning {len(prompt)} tokens for processing.")
-        return prompt
+        return prompt, images
 
     def handle_completion(
         self,
         prompt: Union[List[int], str],
         stop_id_sequences: List[List[int]],
-        images = None,
+        images: Optional[List["Image"]] = None,
     ):
         """
         Generate a response to a prompt and send it to the client in a single batch.
@@ -617,6 +630,8 @@ class APIHandler(BaseHTTPRequestHandler):
             stop_id_sequences (List[List[int]]): A list of stop words passed
               to the stopping_criteria function
         """
+        images = [] if images is None else images
+
         tokens = []
         finish_reason = "length"
         stop_sequence_suffix = None
@@ -628,7 +643,7 @@ class APIHandler(BaseHTTPRequestHandler):
         token_logprobs = []
         top_tokens = []
 
-        prompt = self.get_prompt_cache(prompt)
+        prompt, images = self.get_prompt_cache(prompt, images)
 
         text = ""
         tic = time.perf_counter()
@@ -762,7 +777,7 @@ class APIHandler(BaseHTTPRequestHandler):
         }
         return response
 
-    def handle_chat_completions(self) -> Union[List[int], str]:
+    def handle_chat_completions(self) -> Tuple[Union[List[int], str], List["Image"]]:
         """
         Handle a chat completion request.
 
@@ -776,7 +791,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.request_id = f"chatcmpl-{uuid.uuid4()}"
         self.object_type = "chat.completion.chunk" if self.stream else "chat.completion"
         messages = body["messages"]
-        images = process_vision_info(messages[-1:])  # only process last message
+        images = process_vision_info(messages)  # only process last message
         if isinstance(self.processor, ProcessorMixin):
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True)
         else:
