@@ -37,7 +37,6 @@ from transformers import PreTrainedTokenizer
 from transformers.processing_utils import ProcessorMixin
 
 # Local imports
-from .processor_utils import load_processor
 from .tokenizer_utils import TokenizerWrapper, load_tokenizer
 from .tuner.utils import dequantize as dequantize_model
 from .tuner.utils import get_total_parameters, load_adapters
@@ -72,7 +71,7 @@ def _get_classes(config: dict):
         logging.error(msg)
         raise ValueError(msg)
 
-    return arch.Model, arch.ModelArgs
+    return arch.Model, arch.ModelArgs, getattr(arch, "Processor", None)
 
 
 def compute_bits_per_weight(model):
@@ -145,8 +144,8 @@ def load_model(
     lazy: bool = False,
     strict: bool = True,
     model_config: dict = {},
-    get_model_classes: Callable[[dict], Tuple[Type[nn.Module], Type]] = _get_classes,
-) -> Tuple[nn.Module, dict]:
+    get_model_classes: Callable[[dict], Tuple[Type[nn.Module], Type, Type]] = _get_classes,
+) -> Tuple[nn.Module, dict, Optional[ProcessorMixin]]:
     """
     Load and initialize the model from a given path.
 
@@ -183,10 +182,11 @@ def load_model(
     for wf in weight_files:
         weights.update(mx.load(wf))
 
-    model_class, model_args_class = get_model_classes(config=config)
+    model_class, model_args_class, processor_class = get_model_classes(config=config)
 
     model_args = model_args_class.from_dict(config)
     model = model_class(model_args)
+    processor = processor_class(model_path) if processor_class is not None else None
 
     if hasattr(model, "sanitize"):
         weights = model.sanitize(weights)
@@ -221,7 +221,7 @@ def load_model(
         mx.eval(model.parameters())
 
     model.eval()
-    return model, config
+    return model, config, processor
 
 
 def load(
@@ -230,7 +230,7 @@ def load(
     model_config={},
     adapter_path: Optional[str] = None,
     lazy: bool = False,
-) -> Tuple[nn.Module, TokenizerWrapper]:
+) -> Tuple[nn.Module, TokenizerWrapper, ProcessorMixin]:
     """
     Load the model and tokenizer from a given path or a huggingface repository.
 
@@ -246,7 +246,8 @@ def load(
             loaded in memory before returning, otherwise they will be loaded
             when needed. Default: ``False``
     Returns:
-        Tuple[nn.Module, TokenizerWrapper]: A tuple containing the loaded model and tokenizer.
+        Union[Tuple[nn.Module, TokenizerWrapper], Tuple[nn.Module, TokenizerWrapper, ProcessorMixin]]:
+            A tuple containing the loaded model, tokenizer and processor.
 
     Raises:
         FileNotFoundError: If config file or safetensors are not found.
@@ -254,24 +255,20 @@ def load(
     """
     model_path, _ = get_model_path(path_or_hf_repo)
 
-    model, config = load_model(model_path, lazy)
+    model, config, processor = load_model(model_path, lazy)
     if adapter_path is not None:
         model = load_adapters(model, adapter_path)
         model.eval()
     tokenizer = load_tokenizer(
         model_path, tokenizer_config, eos_token_ids=config.get("eos_token_id", None)
     )
-    processor = load_processor(model_path)
-    if isinstance(processor, ProcessorMixin):
-        return model, tokenizer, processor
-
-    return model, tokenizer
+    return model, tokenizer, processor
 
 
 def fetch_from_hub(
     model_path: Path, lazy: bool = False, trust_remote_code: bool = False
 ) -> Tuple[nn.Module, dict, PreTrainedTokenizer]:
-    model, config = load_model(model_path, lazy)
+    model, config, _ = load_model(model_path, lazy)
     tokenizer = load_tokenizer(
         model_path,
         eos_token_ids=config.get("eos_token_id", None),
@@ -359,7 +356,7 @@ def upload_to_hub(path: str, upload_repo: str):
         ```python
         from mlx_lm import load, generate
 
-        model, tokenizer = load("{upload_repo}")
+        model, tokenizer, _ = load("{upload_repo}")
 
         prompt = "hello"
 

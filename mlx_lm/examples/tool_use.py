@@ -9,7 +9,7 @@ from mlx_lm.models.cache import make_prompt_cache
 checkpoint = "mlx-community/Qwen2.5-32B-Instruct-4bit"
 
 # Load the corresponding model and tokenizer
-model, tokenizer = load(path_or_hf_repo=checkpoint)
+model, tokenizer, _ = load(path_or_hf_repo=checkpoint)
 
 
 # An example tool, make sure to include a docstring and type hints

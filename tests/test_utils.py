@@ -27,9 +27,9 @@ class TestUtils(unittest.TestCase):
         cls.test_dir_fid.cleanup()
 
     def test_load(self):
-        model, _ = utils.load(HF_MODEL_PATH)
+        model, _, _ = utils.load(HF_MODEL_PATH)
 
-        model_lazy, _ = utils.load(HF_MODEL_PATH, lazy=True)
+        model_lazy, _, _ = utils.load(HF_MODEL_PATH, lazy=True)
 
         mx.eval(model_lazy.parameters())
 
@@ -79,14 +79,14 @@ class TestUtils(unittest.TestCase):
         mlx_path = os.path.join(self.test_dir, "mlx_model")
 
         convert(HF_MODEL_PATH, mlx_path=mlx_path, quantize=False)
-        model, _ = utils.load(mlx_path)
+        model, _, _ = utils.load(mlx_path)
         self.assertTrue(isinstance(model.layers[0].mlp.up_proj, nn.QuantizedLinear))
         self.assertTrue(isinstance(model.layers[-1].mlp.up_proj, nn.QuantizedLinear))
 
         # Check model weights have right type
         mlx_path = os.path.join(self.test_dir, "mlx_model_bf16")
         convert(HF_MODEL_PATH, mlx_path=mlx_path, dtype="bfloat16")
-        model, _ = utils.load(mlx_path)
+        model, _, _ = utils.load(mlx_path)
 
         self.assertEqual(model.layers[0].mlp.up_proj.scales.dtype, mx.bfloat16)
         self.assertEqual(model.layers[-1].mlp.up_proj.scales.dtype, mx.bfloat16)

@@ -32,8 +32,13 @@ class TestLoadModelCustomGetClasses(unittest.TestCase):
         def custom_get_classes(config):
             return CustomQwenModel, CustomQwenConfig
 
+<<<<<<< Updated upstream
         model_path, _ = get_model_path(HF_MODEL_PATH)
         model, _ = load_model(model_path, get_model_classes=custom_get_classes)
+=======
+        model_path = get_model_path(HF_MODEL_PATH)
+        model, _, _ = load_model(model_path, get_model_classes=custom_get_classes)
+>>>>>>> Stashed changes
 
         self.assertIsInstance(model, CustomQwenModel)
         self.assertTrue(hasattr(model, "custom_attribute"))
@@ -41,8 +46,13 @@ class TestLoadModelCustomGetClasses(unittest.TestCase):
         self.assertTrue(hasattr(model, "qwenWeights"))
 
     def test_load_model_with_default_get_classes(self):
+<<<<<<< Updated upstream
         model_path, _ = get_model_path(HF_MODEL_PATH)
         model, _ = load_model(model_path)
+=======
+        model_path = get_model_path(HF_MODEL_PATH)
+        model, _, _ = load_model(model_path)
+>>>>>>> Stashed changes
 
         self.assertIsInstance(model, Qwen2Model)
 

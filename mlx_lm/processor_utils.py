@@ -1,169 +1,107 @@
-import base64
-import copy
-import math
-from io import BytesIO
-
-import requests
-from PIL import Image
+import mlx.core as mx
+import numpy as np
+import torch
 from transformers import AutoProcessor
+from transformers.image_utils import load_image
+from transformers.processing_utils import ChatTemplateLoadKwargs
+from transformers.video_utils import load_video
 
 
-# from https://github.com/QwenLM/Qwen2.5-VL/blob/main/qwen-vl-utils/src/qwen_vl_utils/vision_process.py
-IMAGE_FACTOR = 28
-MIN_PIXELS = 4 * 28 * 28
-MAX_PIXELS = 16384 * 28 * 28
-MAX_RATIO = 200
-
-
-def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[dict]:
-    vision_infos = []
-    if isinstance(conversations[0], dict):
-        conversations = [conversations]
-    for conversation in conversations:
-        for message in conversation:
-            if isinstance(message["content"], list):
-                for ele in message["content"]:
-                    if (
-                        "image" in ele
-                        or "image_url" in ele
-                        or "video" in ele
-                        or ele.get("type", "") in ("image", "image_url", "video")
-                    ):
-                        vision_infos.append(ele)
-    return vision_infos
-
-
-def round_by_factor(number: int, factor: int) -> int:
-    """Returns the closest integer to 'number' that is divisible by 'factor'."""
-    return round(number / factor) * factor
-
-
-def ceil_by_factor(number: int, factor: int) -> int:
-    """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
-    return math.ceil(number / factor) * factor
-
-
-def floor_by_factor(number: int, factor: int) -> int:
-    """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
-    return math.floor(number / factor) * factor
-
-
-def smart_resize(
-    height: int,
-    width: int,
-    factor: int = IMAGE_FACTOR,
-    min_pixels: int = MIN_PIXELS,
-    max_pixels: int = MAX_PIXELS,
-) -> tuple[int, int]:
+class ProcessorWrapper:
     """
-    Rescales the image so that the following conditions are met:
-
-    1. Both dimensions (height and width) are divisible by 'factor'.
-
-    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
-
-    3. The aspect ratio of the image is maintained as closely as possible.
+    A wrapper that combines an HF processor and custom processing steps.
+    For multimodal model path, self._processor is usually inherits from ProcessorMixin.
+    For text only model path, self._processor is a `AutoTokenizer`.
     """
-    if max(height, width) / min(height, width) > MAX_RATIO:
-        raise ValueError(
-            f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
-        )
-    h_bar = max(factor, round_by_factor(height, factor))
-    w_bar = max(factor, round_by_factor(width, factor))
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(factor, floor_by_factor(height / beta, factor))
-        w_bar = max(factor, floor_by_factor(width / beta, factor))
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = ceil_by_factor(height * beta, factor)
-        w_bar = ceil_by_factor(width * beta, factor)
-    return h_bar, w_bar
 
+    def __init__(self, model_path: str):
+        self._processor = AutoProcessor.from_pretrained(model_path)
+        self.apply_chat_template = self._processor.apply_chat_template
 
-def to_rgb(pil_image: Image.Image) -> Image.Image:
-    if pil_image.mode == "RGBA":
-        white_background = Image.new("RGB", pil_image.size, (255, 255, 255))
-        white_background.paste(
-            pil_image, mask=pil_image.split()[3]
-        )  # Use alpha channel as mask
-        return white_background
-    else:
-        return pil_image.convert("RGB")
+    def __call__(self, *args, **kwargs):
+        return self._processor(*args, **kwargs)
 
-
-def fetch_image(
-    ele: dict[str, str | Image.Image], size_factor: int = IMAGE_FACTOR
-) -> Image.Image:
-    if "image" in ele:
-        image = ele["image"]
-    else:
-        image = ele["image_url"]["url"]
-
-    image_obj = None
-    if isinstance(image, Image.Image):
-        image_obj = image
-    elif image.startswith("http://") or image.startswith("https://"):
-        # fix memory leak issue while using BytesIO
-        with requests.get(image, stream=True) as response:
-            response.raise_for_status()
-            with BytesIO(response.content) as bio:
-                image_obj = copy.deepcopy(Image.open(bio))
-    elif image.startswith("file://"):
-        image_obj = Image.open(image[7:])
-    elif image.startswith("data:image"):
-        if "base64," in image:
-            _, base64_data = image.split("base64,", 1)
-            data = base64.b64decode(base64_data)
-            # fix memory leak issue while using BytesIO
-            with BytesIO(data) as bio:
-                image_obj = copy.deepcopy(Image.open(bio))
-    else:
-        image_obj = Image.open(image)
-    if image_obj is None:
-        raise ValueError(
-            f"Unrecognized image input, support local path, http url, base64 and PIL.Image, got {image}"
-        )
-    image = to_rgb(image_obj)
-    ## resize
-    if "resized_height" in ele and "resized_width" in ele:
-        resized_height, resized_width = smart_resize(
-            ele["resized_height"],
-            ele["resized_width"],
-            factor=size_factor,
-        )
-    else:
-        width, height = image.size
-        min_pixels = ele.get("min_pixels", MIN_PIXELS)
-        max_pixels = ele.get("max_pixels", MAX_PIXELS)
-        resized_height, resized_width = smart_resize(
-            height,
-            width,
-            factor=size_factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-        )
-    image = image.resize((resized_width, resized_height))
-
-    return image
-
-
-def process_vision_info(
-    conversations: list[dict] | list[list[dict]],
-) -> list[Image.Image]:
-
-    vision_infos = extract_vision_info(conversations)
-    ## Read images
-    image_inputs = []
-    for vision_info in vision_infos:
-        if "image" in vision_info or "image_url" in vision_info:
-            image_inputs.append(fetch_image(vision_info))
+    def load_multimodalities(self, conversation, **kwargs):
+        """
+        Based on transformers.processing_utils.apply_chat_template.
+        Audio is skipped for now.
+        """
+        if isinstance(conversation, (list, tuple)) and (
+            isinstance(conversation[0], (list, tuple)) or hasattr(conversation[0], "content")
+        ):
+            is_batched = True
+            conversations = conversation
         else:
-            raise ValueError("image, image_url should in content.")
-    return image_inputs
+            is_batched = False
+            conversations = [conversation]
 
+        mm_load_kwargs = ChatTemplateLoadKwargs(**kwargs)
 
-def load_processor(model_path):
-    """Load a huggingface processor."""
-    processor = AutoProcessor.from_pretrained(model_path)
-    return processor
+        batch_images, batch_videos = [], []
+        batch_video_metadata = []
+        for conversation in conversations:
+            images, videos = [], []
+            video_metadata = []
+            for message in conversation:
+                visuals = [content for content in message["content"] if content["type"] in ["image", "video"]]
+                image_fnames = [
+                    vision_info[key]
+                    for vision_info in visuals
+                    for key in ["image", "url", "path", "base64"]
+                    if key in vision_info and vision_info["type"] == "image"
+                ]
+                video_fnames = [
+                    vision_info[key]
+                    for vision_info in visuals
+                    for key in ["video", "url", "path"]
+                    if key in vision_info and vision_info["type"] == "video"
+                ]
+
+                for fname in image_fnames:
+                    images.append(load_image(fname))
+
+                for fname in video_fnames:
+                    if isinstance(fname, (list, tuple)) and isinstance(fname[0], str):
+                        # Case a: Video is provided as a list of image file names
+                        video = [np.array(load_image(image_fname)) for image_fname in fname]
+                        video = np.stack(video)
+                        metadata = None
+                    else:
+                        # Case b: Video is provided as a single file path or URL or decoded frames in a np.ndarray or torch.tensor
+                        video, metadata = load_video(
+                            fname,
+                            backend=mm_load_kwargs["video_load_backend"],
+                        )
+                    videos.append(video)
+                    video_metadata.append(metadata)
+
+            # Currently all processors can accept nested list of batches, but not flat list of visuals
+            # So we'll make a batched list of images and let the processor handle it
+            if images:
+                batch_images.append(images)
+            if videos:
+                batch_videos.append(videos)
+                batch_video_metadata.append(video_metadata)
+        
+        if not is_batched:
+            if images:
+                batch_images = batch_images[0]
+            if videos:
+                batch_videos = batch_videos[0]
+                batch_video_metadata = batch_video_metadata[0]
+
+        return {
+            "images": batch_images,
+            "videos": batch_videos,
+            "video_meta": batch_video_metadata,
+        }
+
+    @staticmethod
+    def convert_to_mx_array(np_array_dict):
+        mx_array_dict = {}
+        for k, v in np_array_dict.items():
+            if isinstance(v, torch.Tensor):
+                v = v.numpy()
+            mx_array_dict[k] = mx.array(v)
+        return mx_array_dict
+        

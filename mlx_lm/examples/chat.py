@@ -7,7 +7,7 @@ An example of a multi-turn chat with prompt caching.
 from mlx_lm import generate, load
 from mlx_lm.models.cache import load_prompt_cache, make_prompt_cache, save_prompt_cache
 
-model, tokenizer = load("mlx-community/Mistral-7B-Instruct-v0.3-4bit")
+model, tokenizer, _ = load("mlx-community/Mistral-7B-Instruct-v0.3-4bit")
 
 # Make the initial prompt cache for the model
 prompt_cache = make_prompt_cache(model)

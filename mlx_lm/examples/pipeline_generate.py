@@ -50,7 +50,11 @@ def shard_and_load(repo):
 
     # Lazy load and shard model to figure out
     # which weights we need
+<<<<<<< Updated upstream
     model, config = load_model(model_path, lazy=True, strict=False)
+=======
+    model, _, _ = load_model(model_path, lazy=True, strict=False)
+>>>>>>> Stashed changes
 
     group = mx.distributed.init()
     rank = group.rank()
@@ -68,12 +72,17 @@ def shard_and_load(repo):
     download(args.model, allow_patterns=local_files)
 
     # Load and shard the model, and load the weights
+<<<<<<< Updated upstream
     tokenizer = load_tokenizer(
         model_path,
         {"trust_remote_code": True},
         eos_token_ids=config.get("eos_token_id", None),
     )
     model, _ = load_model(model_path, lazy=True, strict=False)
+=======
+    tokenizer = load_tokenizer(model_path)
+    model, _, _ = load_model(model_path, lazy=True, strict=False)
+>>>>>>> Stashed changes
     model.model.pipeline(group)
     mx.eval(model.parameters())
 

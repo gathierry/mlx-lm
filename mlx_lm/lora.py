@@ -330,7 +330,7 @@ def run(args, training_callback: TrainingCallback = None):
     )
 
     print("Loading pretrained model")
-    model, tokenizer = load(args.model)
+    model, tokenizer, _ = load(args.model)
 
     print("Loading datasets")
     train_set, valid_set, test_set = load_dataset(args, tokenizer)

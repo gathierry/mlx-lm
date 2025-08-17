@@ -17,7 +17,7 @@ class TestGenerate(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.HF_MODEL_PATH = "mlx-community/Qwen1.5-0.5B-Chat-4bit"
-        cls.model, cls.tokenizer = load(cls.HF_MODEL_PATH)
+        cls.model, cls.tokenizer, _ = load(cls.HF_MODEL_PATH)
 
     def test_generate(self):
         # Simple test that generation runs
@@ -59,7 +59,7 @@ class TestGenerate(unittest.TestCase):
 
     def test_stream_generate_speculative(self):
         # Use same model as draft model, this is not a speed test
-        draft_model, _ = load(self.HF_MODEL_PATH)
+        draft_model, _, _ = load(self.HF_MODEL_PATH)
 
         results: List[GenerationResponse] = []
         drafted: List[bool] = []

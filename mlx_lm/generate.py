@@ -27,6 +27,7 @@ from .models.cache import (
     QuantizedKVCache,
     load_prompt_cache,
 )
+from .processor_utils import ProcessorWrapper
 from .sample_utils import make_sampler
 from .tokenizer_utils import TokenizerWrapper
 from .utils import does_model_support_input_embeddings, load
@@ -302,7 +303,7 @@ def generate_step(
     logits_processors: Optional[List[Callable[[mx.array, mx.array], mx.array]]] = None,
     max_kv_size: Optional[int] = None,
     prompt_cache: Optional[Any] = None,
-    prefill_step_size: int = 2048,
+    prefill_step_size: int = 2048 * 4,
     kv_bits: Optional[int] = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
@@ -375,15 +376,15 @@ def generate_step(
 
     sampler = sampler or (lambda x: mx.argmax(x, axis=-1))
 
-    def _model_call(input_tokens: mx.array, input_embeddings: Optional[mx.array]):
+    def _model_call(input_tokens: mx.array, input_embeddings: Optional[mx.array], **kwargs):
         if input_embeddings is not None:
             return model(
-                input_tokens, cache=prompt_cache, input_embeddings=input_embeddings
+                input_tokens, cache=prompt_cache, input_embeddings=input_embeddings, **kwargs
             )
         else:
-            return model(input_tokens, cache=prompt_cache)
+            return model(input_tokens, cache=prompt_cache, **kwargs)
 
-    def _step(input_tokens: mx.array, input_embeddings: Optional[mx.array] = None):
+    def _step(input_tokens: mx.array, input_embeddings: Optional[mx.array] = None, **kwargs):
         nonlocal tokens
         with mx.stream(generation_stream):
             logits = _model_call(
@@ -391,6 +392,7 @@ def generate_step(
                 input_embeddings=(
                     input_embeddings[None] if input_embeddings is not None else None
                 ),
+                **kwargs,
             )
 
             logits = logits[:, -1, :]
@@ -423,6 +425,7 @@ def generate_step(
                     if input_embeddings is not None
                     else None
                 ),
+                **kwargs,
             )
             quantize_cache_fn(prompt_cache)
             mx.eval([c.state for c in prompt_cache])
@@ -435,8 +438,7 @@ def generate_step(
                 else input_embeddings
             )
             mx.clear_cache()
-
-        y, logprobs = _step(input_tokens=prompt, input_embeddings=input_embeddings)
+        y, logprobs = _step(input_tokens=prompt, input_embeddings=input_embeddings, **kwargs)
 
     mx.async_eval(y, logprobs)
     n = 0
@@ -656,21 +658,19 @@ def stream_generate(
         GenerationResponse: An instance containing the generated text segment and
             associated metadata. See :class:`GenerationResponse` for details.
     """
-    processor = kwargs.pop("processor", None)
-    if processor and hasattr(processor, "image_processor"):
+    processor: ProcessorWrapper = kwargs.pop("processor", None)
+    if processor:
         images = kwargs.pop("images", None)
         if images:
             processed = processor(
                 text=prompt,
                 images=images,
-                return_tensors="np",
+                padding=True,
+                return_tensors="pt",
             )
-            for k, v in processed.items():
-                if k == "input_ids":
-                    prompt = mx.array(processed.input_ids[0])
-                else:
-                    kwargs[k] = mx.array(v)
-            kwargs["pixel_values"] = mx.array(processed.pixel_values)
+            mx_array_dict = processor.convert_to_mx_array(processed)
+            prompt = mx_array_dict.pop("input_ids")[0]
+            kwargs = mx_array_dict
 
     if not isinstance(tokenizer, TokenizerWrapper):
         tokenizer = TokenizerWrapper(tokenizer)
@@ -833,7 +833,7 @@ def main():
             )
     model_path = model_path or DEFAULT_MODEL
 
-    model, tokenizer = load(
+    model, tokenizer, _ = load(
         model_path,
         adapter_path=args.adapter_path,
         tokenizer_config=tokenizer_config,
@@ -887,7 +887,7 @@ def main():
         prompt = tokenizer.encode(prompt)
 
     if args.draft_model is not None:
-        draft_model, draft_tokenizer = load(args.draft_model)
+        draft_model, draft_tokenizer, _ = load(args.draft_model)
         if draft_tokenizer.vocab_size != tokenizer.vocab_size:
             raise ValueError("Draft model tokenizer does not match model tokenizer.")
     else:

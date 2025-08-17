@@ -60,7 +60,7 @@ You can use `mlx-lm` as a module:
 ```python
 from mlx_lm import load, generate
 
-model, tokenizer = load("mlx-community/Mistral-7B-Instruct-v0.3-4bit")
+model, tokenizer, _ = load("mlx-community/Mistral-7B-Instruct-v0.3-4bit")
 
 prompt = "Write a story about Einstein"
 
@@ -117,7 +117,7 @@ For example,
 from mlx_lm import load, stream_generate
 
 repo = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
-model, tokenizer = load(repo)
+model, tokenizer, _ = load(repo)
 
 prompt = "Write a story about Einstein"
 
@@ -270,7 +270,7 @@ line.
 These options can also be set in the Python API. For example:
 
 ```python
-model, tokenizer = load(
+model, tokenizer, _ = load(
     "qwen/Qwen-7B",
     tokenizer_config={"eos_token": "<|endoftext|>", "trust_remote_code": True},
 )

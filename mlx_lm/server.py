@@ -26,12 +26,10 @@ from typing import (
 
 import mlx.core as mx
 from huggingface_hub import scan_cache_dir
-from transformers.processing_utils import ProcessorMixin
 
 from ._version import __version__
 from .generate import stream_generate
 from .models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
-from .processor_utils import process_vision_info
 from .sample_utils import make_logits_processors, make_sampler
 from .utils import common_prefix_len, load
 
@@ -157,7 +155,8 @@ class PromptCache:
     cache: List[Any] = field(default_factory=list)
     model_key: Tuple[str, Optional[str]] = ("", None, None)
     tokens: List[int] = field(default_factory=list)
-    images: List["Image"] = field(default_factory=list)
+    # indicating if multimodal embedding cached. If true, force reset in next round.
+    has_mm_cache: bool = False
 
 
 class ModelProvider:
@@ -204,7 +203,7 @@ class ModelProvider:
                     "A model path has to be given as a CLI "
                     "argument or in the HTTP request"
                 )
-            loaded = load(
+            model, tokenizer, processor = load(
                 self.cli_args.model,
                 adapter_path=(
                     adapter_path if adapter_path else self.cli_args.adapter_path
@@ -213,14 +212,9 @@ class ModelProvider:
             )
         else:
             self._validate_model_path(model_path)
-            loaded = load(
+            model, tokenizer, processor = load(
                 model_path, adapter_path=adapter_path, tokenizer_config=tokenizer_config
             )
-        if len(loaded) == 3:
-            model, tokenizer, processor = loaded
-        else:
-            model, tokenizer = loaded
-            processor = None
 
         if self.cli_args.use_default_chat_template:
             if tokenizer.chat_template is None:
@@ -244,12 +238,12 @@ class ModelProvider:
             draft_model_path == "default_model"
             and self.cli_args.draft_model is not None
         ):
-            self.draft_model, draft_tokenizer = load(self.cli_args.draft_model)
+            self.draft_model, draft_tokenizer, _ = load(self.cli_args.draft_model)
             validate_draft_tokenizer(draft_tokenizer)
 
         elif draft_model_path is not None and draft_model_path != "default_model":
             self._validate_model_path(draft_model_path)
-            self.draft_model, draft_tokenizer = load(draft_model_path)
+            self.draft_model, draft_tokenizer, _ = load(draft_model_path)
             validate_draft_tokenizer(draft_tokenizer)
         return self.model, self.tokenizer, self.processor
 
@@ -391,8 +385,8 @@ class APIHandler(BaseHTTPRequestHandler):
         )
 
         # Call endpoint specific method
-        prompt, images = endpoints[self.path]()
-        self.handle_completion(prompt, stop_id_sequences, images=images)
+        prompt, mm_prompt = endpoints[self.path]()
+        self.handle_completion(prompt, stop_id_sequences, mm_prompt)
 
     def validate_model_parameters(self):
         """
@@ -578,7 +572,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.prompt_cache.tokens = list(prompt)  # Cache the new prompt fully
         self.prompt_cache.images = images if images else []
 
-    def get_prompt_cache(self, prompt, images):
+    def get_prompt_cache(self, prompt, mm_prompt=None):
         """
         Determines the portion of the prompt that needs processing by comparing
         it to the cached prompt and attempting to reuse the common prefix.
@@ -590,7 +584,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
         Args:
             prompt (List[int]): The tokenized new prompt.
-            images (Optional[List[Image]]): Image inputs.
+            mm_prompt (Optional[Dict[Any]]): Multimodal prompt.
 
         Returns:
             List[int]: The suffix of the prompt that actually needs to be processed
@@ -601,15 +595,13 @@ class APIHandler(BaseHTTPRequestHandler):
         prompt_len = len(prompt)
         com_prefix_len = common_prefix_len(self.prompt_cache.tokens, prompt)
 
-        com_prefix_len_img = common_prefix_len(self.prompt_cache.images, images)
-
         # Leave at least one token in the prompt
         com_prefix_len = min(com_prefix_len, len(prompt) - 1)
 
         # Condition 1: Model changed or no common prefix at all. Reset cache.
         if (
             self.prompt_cache.model_key != self.model_provider.model_key
-            or com_prefix_len == 0
+            or com_prefix_len == 0 or mm_prompt or self.prompt_cache.has_mm_cache
         ):
             self.reset_prompt_cache(prompt)
 
@@ -620,9 +612,6 @@ class APIHandler(BaseHTTPRequestHandler):
             )
             prompt = prompt[com_prefix_len:]
             self.prompt_cache.tokens.extend(prompt)
-            if images:
-                images = images[com_prefix_len_img:]
-                self.prompt_cache.images.extend(images)
 
         # Condition 3: Common prefix exists but is shorter than cache length. Attempt trim.
         elif com_prefix_len < cache_len:
@@ -630,17 +619,17 @@ class APIHandler(BaseHTTPRequestHandler):
                 f"*** Common prefix ({com_prefix_len}) shorter than cache ({cache_len}). Attempting trim. ***"
             )
 
-            # if can_trim_prompt_cache(self.prompt_cache.cache):
-            #     num_to_trim = cache_len - com_prefix_len
-            #     logging.debug(f"    Trimming {num_to_trim} tokens from cache.")
-            #     trim_prompt_cache(self.prompt_cache.cache, num_to_trim)
-            #     self.prompt_cache.tokens = self.prompt_cache.tokens[:com_prefix_len]
-            #     prompt = prompt[com_prefix_len:]
-            #     self.prompt_cache.tokens.extend(prompt)
-            # else:
-            #     logging.debug(f"    Cache cannot be trimmed. Resetting cache.")
-            #    self.reset_prompt_cache(prompt)
-            self.reset_prompt_cache(prompt)
+            if can_trim_prompt_cache(self.prompt_cache.cache):
+                # won't work if prompt cache is not text-only
+                num_to_trim = cache_len - com_prefix_len
+                logging.debug(f"    Trimming {num_to_trim} tokens from cache.")
+                trim_prompt_cache(self.prompt_cache.cache, num_to_trim)
+                self.prompt_cache.tokens = self.prompt_cache.tokens[:com_prefix_len]
+                prompt = prompt[com_prefix_len:]
+                self.prompt_cache.tokens.extend(prompt)
+            else:
+                logging.debug(f"    Cache cannot be trimmed. Resetting cache.")
+                self.reset_prompt_cache(prompt)
 
         # This case should logically not be reached if com_prefix_len <= cache_len
         else:
@@ -649,14 +638,17 @@ class APIHandler(BaseHTTPRequestHandler):
             )
             self.reset_prompt_cache(prompt)
 
+        if mm_prompt:
+            self.prompt_cache.has_mm_cache = True
+
         logging.debug(f"Returning {len(prompt)} tokens for processing.")
-        return prompt, images
+        return prompt
 
     def handle_completion(
         self,
         prompt: Union[List[int], str],
         stop_id_sequences: List[List[int]],
-        images: Optional[List["Image"]] = None,
+        mm_prompt: Optional[Dict[str, Any]] = None,
     ):
         """
         Generate a response to a prompt and send it to the client in a single batch.
@@ -666,8 +658,6 @@ class APIHandler(BaseHTTPRequestHandler):
             stop_id_sequences (List[List[int]]): A list of stop words passed
               to the stopping_criteria function
         """
-        images = [] if images is None else images
-
         tokens = []
         finish_reason = "length"
         stop_sequence_suffix = None
@@ -679,7 +669,7 @@ class APIHandler(BaseHTTPRequestHandler):
         token_logprobs = []
         top_tokens = []
 
-        prompt, images = self.get_prompt_cache(prompt, images)
+        prompt = self.get_prompt_cache(prompt, mm_prompt)
 
         text = ""
         tic = time.perf_counter()
@@ -716,7 +706,7 @@ class APIHandler(BaseHTTPRequestHandler):
             draft_model=self.model_provider.draft_model,
             num_draft_tokens=self.num_draft_tokens,
             processor=self.processor,
-            images=images,
+            **mm_prompt,
         ):
             logging.debug(gen_response.text)
 
@@ -847,7 +837,7 @@ class APIHandler(BaseHTTPRequestHandler):
         }
         return response
 
-    def handle_chat_completions(self) -> Tuple[Union[List[int], str], List["Image"]]:
+    def handle_chat_completions(self) -> Tuple[Union[List[int], str], Optional[Dict[str, Any]]]:
         """
         Handle a chat completion request.
 
@@ -861,22 +851,23 @@ class APIHandler(BaseHTTPRequestHandler):
         self.request_id = f"chatcmpl-{uuid.uuid4()}"
         self.object_type = "chat.completion.chunk" if self.stream else "chat.completion"
         messages = body["messages"]
-        images = process_vision_info(messages)  # only process last message
-        if isinstance(self.processor, ProcessorMixin):
+        if self.processor is not None:
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+            mm_prompt = self.processor.load_multimodalities(messages)
+            return prompt, mm_prompt
+
+        if self.tokenizer.chat_template:
+            process_message_content(messages)
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                body.get("tools") or None,
+                add_generation_prompt=True,
+                **self.model_provider.cli_args.chat_template_args,
+            )
         else:
-            if self.tokenizer.chat_template:
-                process_message_content(messages)
-                prompt = self.tokenizer.apply_chat_template(
-                    messages,
-                    body.get("tools") or None,
-                    add_generation_prompt=True,
-                    **self.model_provider.cli_args.chat_template_args,
-                )
-            else:
-                prompt = convert_chat(messages, body.get("role_mapping"))
-                prompt = self.tokenizer.encode(prompt)
-        return prompt, images
+            prompt = convert_chat(messages, body.get("role_mapping"))
+            prompt = self.tokenizer.encode(prompt)
+        return prompt, {}
 
     def handle_text_completions(self) -> List[int]:
         """
