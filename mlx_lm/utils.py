@@ -37,6 +37,7 @@ from transformers import PreTrainedTokenizer
 from transformers.processing_utils import ProcessorMixin
 
 # Local imports
+from .processor_utils import ProcessorWrapper
 from .tokenizer_utils import TokenizerWrapper, load_tokenizer
 from .tuner.utils import dequantize as dequantize_model
 from .tuner.utils import get_total_parameters, load_adapters
@@ -71,7 +72,7 @@ def _get_classes(config: dict):
         logging.error(msg)
         raise ValueError(msg)
 
-    return arch.Model, arch.ModelArgs, getattr(arch, "Processor", None)
+    return arch.Model, arch.ModelArgs
 
 
 def compute_bits_per_weight(model):
@@ -144,7 +145,7 @@ def load_model(
     lazy: bool = False,
     strict: bool = True,
     model_config: dict = {},
-    get_model_classes: Callable[[dict], Tuple[Type[nn.Module], Type, Type]] = _get_classes,
+    get_model_classes: Callable[[dict], Tuple[Type[nn.Module], Type]] = _get_classes,
 ) -> Tuple[nn.Module, dict, Optional[ProcessorMixin]]:
     """
     Load and initialize the model from a given path.
@@ -182,11 +183,13 @@ def load_model(
     for wf in weight_files:
         weights.update(mx.load(wf))
 
-    model_class, model_args_class, processor_class = get_model_classes(config=config)
+    model_class, model_args_class = get_model_classes(config=config)
 
     model_args = model_args_class.from_dict(config)
     model = model_class(model_args)
-    processor = processor_class(model_path) if processor_class is not None else None
+    processor = ProcessorWrapper(model_path)
+    if not isinstance(processor.processor, ProcessorMixin):
+        processor = None
 
     if hasattr(model, "sanitize"):
         weights = model.sanitize(weights)

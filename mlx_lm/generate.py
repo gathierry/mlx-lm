@@ -670,7 +670,7 @@ def stream_generate(
             )
             mx_array_dict = processor.convert_to_mx_array(processed)
             prompt = mx_array_dict.pop("input_ids")[0]
-            kwargs = mx_array_dict
+            kwargs.update(mx_array_dict)
 
     if not isinstance(tokenizer, TokenizerWrapper):
         tokenizer = TokenizerWrapper(tokenizer)

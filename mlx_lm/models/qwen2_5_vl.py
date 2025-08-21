@@ -1,21 +1,30 @@
-import base64
-import copy
-import math
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Dict, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
-import requests
-from PIL import Image
-
-from mlx_lm.processor_utils import ProcessorWrapper
 
 from .base import BaseModelArgs
 from .qwen2 import Qwen2Model
 
+
+@dataclass
+class VisionArgs(BaseModelArgs):
+    depth: int
+    hidden_act: str
+    hidden_size: int
+    intermediate_size: int
+    num_heads: int
+    in_chans: int
+    out_hidden_size: int
+    patch_size: int
+    spatial_merge_size: int
+    spatial_patch_size: int
+    window_size: int
+    fullatt_block_indexes: List[int]
+    tokens_per_second: int
+    temporal_patch_size: int
 
 @dataclass
 class ModelArgs(BaseModelArgs):
@@ -34,8 +43,10 @@ class ModelArgs(BaseModelArgs):
     rope_traditional: bool = False
     rope_scaling: Optional[Dict[str, Union[float, str]]] = None
     tie_word_embeddings: bool = True
-    vision_config: Optional[Dict[str, Union[bool, int, str, List[int]]]] = None
+    vision_config: Union[VisionArgs, dict] = None
 
+    def __post_init__(self):
+        self.vision_config = VisionArgs.from_dict(self.vision_config)
 
 class Qwen2_5_VisionPatchEmbed(nn.Module):
     def __init__(
@@ -166,24 +177,24 @@ _ACT2FN = {
 
 
 class Qwen2_5_VLMLP(nn.Module):
-    def __init__(self, args, bias: bool = False):
+    def __init__(self, vision_config: VisionArgs, bias: bool = False):
         super().__init__()
         self.gate_proj = nn.Linear(
-            args.vision_config["hidden_size"],
-            args.vision_config["intermediate_size"],
+            vision_config.hidden_size,
+            vision_config.intermediate_size,
             bias=bias,
         )
         self.up_proj = nn.Linear(
-            args.vision_config["hidden_size"],
-            args.vision_config["intermediate_size"],
+            vision_config.hidden_size,
+            vision_config.intermediate_size,
             bias=bias,
         )
         self.down_proj = nn.Linear(
-            args.vision_config["intermediate_size"],
-            args.vision_config["hidden_size"],
+            vision_config.intermediate_size,
+            vision_config.hidden_size,
             bias=bias,
         )
-        self.act_fn = _ACT2FN[args.vision_config["hidden_act"]]
+        self.act_fn = _ACT2FN[vision_config.hidden_act]
 
     def __call__(self, hidden_state):
         return self.down_proj(
@@ -192,16 +203,16 @@ class Qwen2_5_VLMLP(nn.Module):
 
 
 class Qwen2_5_VLVisionBlock(nn.Module):
-    def __init__(self, args: ModelArgs) -> None:
+    def __init__(self, vision_config: VisionArgs) -> None:
         super().__init__()
-        self.norm1 = nn.RMSNorm(args.vision_config["hidden_size"], eps=1e-6)
-        self.norm2 = nn.RMSNorm(args.vision_config["hidden_size"], eps=1e-6)
+        self.norm1 = nn.RMSNorm(vision_config.hidden_size, eps=1e-6)
+        self.norm2 = nn.RMSNorm(vision_config.hidden_size, eps=1e-6)
 
         self.attn = Qwen2_5_VLVisionAttention(
-            dim=args.vision_config["hidden_size"],
-            num_heads=args.vision_config["num_heads"],
+            dim=vision_config.hidden_size,
+            num_heads=vision_config.num_heads,
         )
-        self.mlp = Qwen2_5_VLMLP(args, bias=True)
+        self.mlp = Qwen2_5_VLMLP(vision_config, bias=True)
 
     def __call__(
         self,
@@ -238,31 +249,31 @@ class Qwen2_5_VLPatchMerger(nn.Module):
 
 class Qwen2_5_VisionTransformer(nn.Module):
 
-    def __init__(self, args: ModelArgs) -> None:
+    def __init__(self, vision_config: VisionArgs) -> None:
         super().__init__()
-        self.spatial_merge_size = args.vision_config["spatial_merge_size"]
-        self.patch_size = args.vision_config["patch_size"]
-        self.fullatt_block_indexes = args.vision_config["fullatt_block_indexes"]
-        self.window_size = args.vision_config["window_size"]
+        self.spatial_merge_size = vision_config.spatial_merge_size
+        self.patch_size = vision_config.patch_size
+        self.fullatt_block_indexes = vision_config.fullatt_block_indexes
+        self.window_size = vision_config.window_size
         self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
 
         self.patch_embed = Qwen2_5_VisionPatchEmbed(
             patch_size=self.patch_size,
-            temporal_patch_size=args.vision_config["temporal_patch_size"],
-            in_channels=args.vision_config["in_chans"],
-            embed_dim=args.vision_config["hidden_size"],
+            temporal_patch_size=vision_config.temporal_patch_size,
+            in_channels=vision_config.in_chans,
+            embed_dim=vision_config.hidden_size,
         )
 
-        head_dim = args.vision_config["hidden_size"] // args.vision_config["num_heads"]
+        head_dim = vision_config.hidden_size // vision_config.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
         self.blocks = [
-            Qwen2_5_VLVisionBlock(args) for _ in range(args.vision_config["depth"])
+            Qwen2_5_VLVisionBlock(vision_config) for _ in range(vision_config.depth)
         ]
         self.merger = Qwen2_5_VLPatchMerger(
-            dim=args.vision_config["out_hidden_size"],
-            context_dim=args.vision_config["hidden_size"],
-            spatial_merge_size=args.vision_config["spatial_merge_size"],
+            dim=vision_config.out_hidden_size,
+            context_dim=vision_config.hidden_size,
+            spatial_merge_size=vision_config.spatial_merge_size,
         )
 
     def rot_pos_emb(self, grid_thw):
@@ -470,7 +481,7 @@ class Model(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
-        self.vision_tower = Qwen2_5_VisionTransformer(args)
+        self.vision_tower = Qwen2_5_VisionTransformer(args.vision_config)
         self.language_model = LanguageModel(args)
 
     def get_input_embeddings(
@@ -536,177 +547,3 @@ class Model(nn.Module):
     @property
     def layers(self):
         return self.language_model.model.layers
-
-
-# from https://github.com/QwenLM/Qwen2.5-VL/blob/main/qwen-vl-utils/src/qwen_vl_utils/vision_process.py
-IMAGE_FACTOR = 28
-MIN_PIXELS = 4 * 28 * 28
-MAX_PIXELS = 16384 * 28 * 28
-MAX_RATIO = 200
-
-
-def round_by_factor(number: int, factor: int) -> int:
-    """Returns the closest integer to 'number' that is divisible by 'factor'."""
-    return round(number / factor) * factor
-
-
-def ceil_by_factor(number: int, factor: int) -> int:
-    """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
-    return math.ceil(number / factor) * factor
-
-
-def floor_by_factor(number: int, factor: int) -> int:
-    """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
-    return math.floor(number / factor) * factor
-
-
-def smart_resize(
-    height: int,
-    width: int,
-    factor: int = IMAGE_FACTOR,
-    min_pixels: int = MIN_PIXELS,
-    max_pixels: int = MAX_PIXELS,
-) -> tuple[int, int]:
-    """
-    Rescales the image so that the following conditions are met:
-
-    1. Both dimensions (height and width) are divisible by 'factor'.
-
-    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
-
-    3. The aspect ratio of the image is maintained as closely as possible.
-    """
-    if max(height, width) / min(height, width) > MAX_RATIO:
-        raise ValueError(
-            f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
-        )
-    h_bar = max(factor, round_by_factor(height, factor))
-    w_bar = max(factor, round_by_factor(width, factor))
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(factor, floor_by_factor(height / beta, factor))
-        w_bar = max(factor, floor_by_factor(width / beta, factor))
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = ceil_by_factor(height * beta, factor)
-        w_bar = ceil_by_factor(width * beta, factor)
-    return h_bar, w_bar
-
-
-def to_rgb(pil_image: Image.Image) -> Image.Image:
-    if pil_image.mode == "RGBA":
-        white_background = Image.new("RGB", pil_image.size, (255, 255, 255))
-        white_background.paste(
-            pil_image, mask=pil_image.split()[3]
-        )  # Use alpha channel as mask
-        return white_background
-    else:
-        return pil_image.convert("RGB")
-
-
-def fetch_image(
-    ele: dict[str, str | Image.Image], size_factor: int = IMAGE_FACTOR
-) -> Image.Image:
-    if "image" in ele:
-        image = ele["image"]
-    else:
-        image = ele["image_url"]["url"]
-
-    image_obj = None
-    if isinstance(image, Image.Image):
-        image_obj = image
-    elif image.startswith("http://") or image.startswith("https://"):
-        # fix memory leak issue while using BytesIO
-        with requests.get(image, stream=True) as response:
-            response.raise_for_status()
-            with BytesIO(response.content) as bio:
-                image_obj = copy.deepcopy(Image.open(bio))
-    elif image.startswith("file://"):
-        image_obj = Image.open(image[7:])
-    elif image.startswith("data:image"):
-        if "base64," in image:
-            _, base64_data = image.split("base64,", 1)
-            data = base64.b64decode(base64_data)
-            # fix memory leak issue while using BytesIO
-            with BytesIO(data) as bio:
-                image_obj = copy.deepcopy(Image.open(bio))
-    else:
-        image_obj = Image.open(image)
-    if image_obj is None:
-        raise ValueError(
-            f"Unrecognized image input, support local path, http url, base64 and PIL.Image, got {image}"
-        )
-    image = to_rgb(image_obj)
-
-    ## resize
-    if "resized_height" in ele and "resized_width" in ele:
-        resized_height, resized_width = smart_resize(
-            ele["resized_height"],
-            ele["resized_width"],
-            factor=size_factor,
-        )
-    else:
-        width, height = image.size
-        min_pixels = ele.get("min_pixels", MIN_PIXELS)
-        max_pixels = ele.get("max_pixels", MAX_PIXELS)
-        resized_height, resized_width = smart_resize(
-            height,
-            width,
-            factor=size_factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-        )
-    image = image.resize((resized_width, resized_height))
-
-    return image
-
-
-def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[dict]:
-    vision_infos = []
-    if isinstance(conversations[0], dict):
-        conversations = [conversations]
-    for conversation in conversations:
-        for message in conversation:
-            if isinstance(message["content"], list):
-                for ele in message["content"]:
-                    if (
-                        "image" in ele
-                        or "image_url" in ele
-                        or "video" in ele
-                        or ele.get("type", "") in ("image", "image_url", "video")
-                    ):
-                        vision_infos.append(ele)
-    return vision_infos
-
-
-def process_vision_info(
-    conversations: list[dict] | list[list[dict]],
-) -> tuple[list[Image.Image] | None, list[list[Image.Image]] | None]:
-
-    vision_infos = extract_vision_info(conversations)
-    ## Read images or videos
-    image_inputs = []
-    video_inputs = []
-    for vision_info in vision_infos:
-        if "image" in vision_info or "image_url" in vision_info:
-            image_inputs.append(fetch_image(vision_info))
-        elif "video" in vision_info:
-            raise NotImplementedError
-        else:
-            raise ValueError("image, image_url or video should in content.")
-    if len(image_inputs) == 0:
-        image_inputs = None
-    if len(video_inputs) == 0:
-        video_inputs = None
-    return image_inputs, video_inputs
-
-
-class Processor(ProcessorWrapper):
-    def load_multimodalities(self, conversation, **kwargs):
-        image_inputs, video_inputs = process_vision_info(conversation)
-        results = dict()
-        if image_inputs is not None:
-            results["images"] = image_inputs
-        if video_inputs is not None:
-            results["videos"] = video_inputs
-        return results

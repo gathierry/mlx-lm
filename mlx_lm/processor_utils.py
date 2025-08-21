@@ -18,6 +18,10 @@ class ProcessorWrapper:
         self._processor = AutoProcessor.from_pretrained(model_path)
         self.apply_chat_template = self._processor.apply_chat_template
 
+    @property
+    def processor(self):
+        return self._processor
+
     def __call__(self, *args, **kwargs):
         return self._processor(*args, **kwargs)
 
