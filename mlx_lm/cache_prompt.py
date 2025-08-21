@@ -99,7 +99,7 @@ def main():
     if args.eos_token is not None:
         tokenizer_config["eos_token"] = args.eos_token
 
-    model, tokenizer = load(
+    model, tokenizer, _ = load(
         args.model,
         adapter_path=args.adapter_path,
         tokenizer_config=tokenizer_config,

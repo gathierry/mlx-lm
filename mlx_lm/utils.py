@@ -22,6 +22,7 @@ from typing import (
 
 import mlx.core as mx
 import mlx.nn as nn
+from PIL.Image import Image
 
 if os.getenv("MLXLM_USE_MODELSCOPE", "False").lower() == "true":
     try:
@@ -33,8 +34,10 @@ else:
 
 from mlx.utils import tree_flatten, tree_map, tree_reduce
 from transformers import PreTrainedTokenizer
+from transformers.processing_utils import ProcessorMixin
 
 # Local imports
+from .processor_utils import ProcessorWrapper
 from .tokenizer_utils import TokenizerWrapper, load_tokenizer
 from .tuner.utils import dequantize as dequantize_model
 from .tuner.utils import get_total_parameters, load_adapters
@@ -143,7 +146,7 @@ def load_model(
     strict: bool = True,
     model_config: dict = {},
     get_model_classes: Callable[[dict], Tuple[Type[nn.Module], Type]] = _get_classes,
-) -> Tuple[nn.Module, dict]:
+) -> Tuple[nn.Module, dict, Optional[ProcessorMixin]]:
     """
     Load and initialize the model from a given path.
 
@@ -184,6 +187,9 @@ def load_model(
 
     model_args = model_args_class.from_dict(config)
     model = model_class(model_args)
+    processor = ProcessorWrapper(model_path)
+    if not isinstance(processor.processor, ProcessorMixin):
+        processor = None
 
     if hasattr(model, "sanitize"):
         weights = model.sanitize(weights)
@@ -218,7 +224,7 @@ def load_model(
         mx.eval(model.parameters())
 
     model.eval()
-    return model, config
+    return model, config, processor
 
 
 def load(
@@ -227,7 +233,7 @@ def load(
     model_config={},
     adapter_path: Optional[str] = None,
     lazy: bool = False,
-) -> Tuple[nn.Module, TokenizerWrapper]:
+) -> Tuple[nn.Module, TokenizerWrapper, ProcessorMixin]:
     """
     Load the model and tokenizer from a given path or a huggingface repository.
 
@@ -243,7 +249,8 @@ def load(
             loaded in memory before returning, otherwise they will be loaded
             when needed. Default: ``False``
     Returns:
-        Tuple[nn.Module, TokenizerWrapper]: A tuple containing the loaded model and tokenizer.
+        Union[Tuple[nn.Module, TokenizerWrapper], Tuple[nn.Module, TokenizerWrapper, ProcessorMixin]]:
+            A tuple containing the loaded model, tokenizer and processor.
 
     Raises:
         FileNotFoundError: If config file or safetensors are not found.
@@ -251,21 +258,20 @@ def load(
     """
     model_path, _ = get_model_path(path_or_hf_repo)
 
-    model, config = load_model(model_path, lazy)
+    model, config, processor = load_model(model_path, lazy)
     if adapter_path is not None:
         model = load_adapters(model, adapter_path)
         model.eval()
     tokenizer = load_tokenizer(
         model_path, tokenizer_config, eos_token_ids=config.get("eos_token_id", None)
     )
-
-    return model, tokenizer
+    return model, tokenizer, processor
 
 
 def fetch_from_hub(
     model_path: Path, lazy: bool = False, trust_remote_code: bool = False
 ) -> Tuple[nn.Module, dict, PreTrainedTokenizer]:
-    model, config = load_model(model_path, lazy)
+    model, config, _ = load_model(model_path, lazy)
     tokenizer = load_tokenizer(
         model_path,
         eos_token_ids=config.get("eos_token_id", None),
@@ -353,7 +359,7 @@ def upload_to_hub(path: str, upload_repo: str):
         ```python
         from mlx_lm import load, generate
 
-        model, tokenizer = load("{upload_repo}")
+        model, tokenizer, _ = load("{upload_repo}")
 
         prompt = "hello"
 
@@ -552,6 +558,14 @@ def save(
         create_model_card(dst_path, hf_repo)
 
 
+def images_equal_bytes(img1: Image, img2: Image) -> bool:
+    return (
+        img1.mode == img2.mode and
+        img1.size == img2.size and
+        img1.tobytes() == img2.tobytes()
+    )
+
+
 def common_prefix_len(list1, list2):
     """
     Calculates the length of the common prefix of two lists.
@@ -569,6 +583,10 @@ def common_prefix_len(list1, list2):
 
     # Iterate up to the length of the shorter list
     for i in range(min_len):
+        if isinstance(list1[i], Image) and isinstance(list2[i], Image):
+            if images_equal_bytes(list1[i], list2[i]):
+                return i
+
         if list1[i] != list2[i]:
             # Mismatch found, the common prefix length is the current index
             return i

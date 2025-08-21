@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     List,
@@ -31,6 +32,9 @@ from .generate import stream_generate
 from .models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
 from .sample_utils import make_logits_processors, make_sampler
 from .utils import common_prefix_len, load
+
+if TYPE_CHECKING:
+    from PIL.Image import Image
 
 
 def get_system_fingerprint():
@@ -138,8 +142,9 @@ def process_message_content(messages):
             text_fragments = [
                 fragment["text"] for fragment in content if fragment["type"] == "text"
             ]
-            if len(text_fragments) != len(content):
-                raise ValueError("Only 'text' content type is supported.")
+            # comment this out as we are adding image
+            # if len(text_fragments) != len(content):
+            #     raise ValueError("Only 'text' content type is supported.")
             message["content"] = "".join(text_fragments)
         elif content is None:
             message["content"] = ""
@@ -150,6 +155,8 @@ class PromptCache:
     cache: List[Any] = field(default_factory=list)
     model_key: Tuple[str, Optional[str]] = ("", None, None)
     tokens: List[int] = field(default_factory=list)
+    # indicating if multimodal embedding cached. If true, force reset in next round.
+    has_mm_cache: bool = False
 
 
 class ModelProvider:
@@ -175,7 +182,7 @@ class ModelProvider:
     # Added in adapter_path to load dynamically
     def load(self, model_path, adapter_path=None, draft_model_path=None):
         if self.model_key == (model_path, adapter_path, draft_model_path):
-            return self.model, self.tokenizer
+            return self.model, self.tokenizer, self.processor
 
         # Remove the old model if it exists.
         self.model = None
@@ -196,7 +203,7 @@ class ModelProvider:
                     "A model path has to be given as a CLI "
                     "argument or in the HTTP request"
                 )
-            model, tokenizer = load(
+            model, tokenizer, processor = load(
                 self.cli_args.model,
                 adapter_path=(
                     adapter_path if adapter_path else self.cli_args.adapter_path
@@ -205,7 +212,7 @@ class ModelProvider:
             )
         else:
             self._validate_model_path(model_path)
-            model, tokenizer = load(
+            model, tokenizer, processor = load(
                 model_path, adapter_path=adapter_path, tokenizer_config=tokenizer_config
             )
 
@@ -216,6 +223,7 @@ class ModelProvider:
         self.model_key = (model_path, adapter_path, draft_model_path)
         self.model = model
         self.tokenizer = tokenizer
+        self.processor = processor
 
         def validate_draft_tokenizer(draft_tokenizer):
             # Check if tokenizers are compatible
@@ -230,14 +238,14 @@ class ModelProvider:
             draft_model_path == "default_model"
             and self.cli_args.draft_model is not None
         ):
-            self.draft_model, draft_tokenizer = load(self.cli_args.draft_model)
+            self.draft_model, draft_tokenizer, _ = load(self.cli_args.draft_model)
             validate_draft_tokenizer(draft_tokenizer)
 
         elif draft_model_path is not None and draft_model_path != "default_model":
             self._validate_model_path(draft_model_path)
-            self.draft_model, draft_tokenizer = load(draft_model_path)
+            self.draft_model, draft_tokenizer, _ = load(draft_model_path)
             validate_draft_tokenizer(draft_tokenizer)
-        return self.model, self.tokenizer
+        return self.model, self.tokenizer, self.processor
 
 
 class APIHandler(BaseHTTPRequestHandler):
@@ -349,7 +357,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.validate_model_parameters()
         # Load the model if needed
         try:
-            self.model, self.tokenizer = self.model_provider.load(
+            self.model, self.tokenizer, self.processor = self.model_provider.load(
                 self.requested_model,
                 self.adapter,
                 self.requested_draft_model,
@@ -377,8 +385,8 @@ class APIHandler(BaseHTTPRequestHandler):
         )
 
         # Call endpoint specific method
-        prompt = endpoints[self.path]()
-        self.handle_completion(prompt, stop_id_sequences)
+        prompt, mm_prompt = endpoints[self.path]()
+        self.handle_completion(prompt, stop_id_sequences, mm_prompt)
 
     def validate_model_parameters(self):
         """
@@ -547,7 +555,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
         return response
 
-    def reset_prompt_cache(self, prompt):
+    def reset_prompt_cache(self, prompt, images=None):
         """Resets the prompt cache and associated state.
 
         Args:
@@ -562,8 +570,9 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.model_provider.draft_model
             )
         self.prompt_cache.tokens = list(prompt)  # Cache the new prompt fully
+        self.prompt_cache.images = images if images else []
 
-    def get_prompt_cache(self, prompt):
+    def get_prompt_cache(self, prompt, mm_prompt=None):
         """
         Determines the portion of the prompt that needs processing by comparing
         it to the cached prompt and attempting to reuse the common prefix.
@@ -575,6 +584,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
         Args:
             prompt (List[int]): The tokenized new prompt.
+            mm_prompt (Optional[Dict[Any]]): Multimodal prompt.
 
         Returns:
             List[int]: The suffix of the prompt that actually needs to be processed
@@ -591,7 +601,7 @@ class APIHandler(BaseHTTPRequestHandler):
         # Condition 1: Model changed or no common prefix at all. Reset cache.
         if (
             self.prompt_cache.model_key != self.model_provider.model_key
-            or com_prefix_len == 0
+            or com_prefix_len == 0 or mm_prompt or self.prompt_cache.has_mm_cache
         ):
             self.reset_prompt_cache(prompt)
 
@@ -610,6 +620,7 @@ class APIHandler(BaseHTTPRequestHandler):
             )
 
             if can_trim_prompt_cache(self.prompt_cache.cache):
+                # won't work if prompt cache is not text-only
                 num_to_trim = cache_len - com_prefix_len
                 logging.debug(f"    Trimming {num_to_trim} tokens from cache.")
                 trim_prompt_cache(self.prompt_cache.cache, num_to_trim)
@@ -627,13 +638,17 @@ class APIHandler(BaseHTTPRequestHandler):
             )
             self.reset_prompt_cache(prompt)
 
+        if mm_prompt:
+            self.prompt_cache.has_mm_cache = True
+
         logging.debug(f"Returning {len(prompt)} tokens for processing.")
         return prompt
 
     def handle_completion(
         self,
-        prompt: List[int],
+        prompt: Union[List[int], str],
         stop_id_sequences: List[List[int]],
+        mm_prompt: Optional[Dict[str, Any]] = None,
     ):
         """
         Generate a response to a prompt and send it to the client in a single batch.
@@ -654,7 +669,7 @@ class APIHandler(BaseHTTPRequestHandler):
         token_logprobs = []
         top_tokens = []
 
-        prompt = self.get_prompt_cache(prompt)
+        prompt = self.get_prompt_cache(prompt, mm_prompt)
 
         text = ""
         tic = time.perf_counter()
@@ -708,6 +723,8 @@ class APIHandler(BaseHTTPRequestHandler):
             draft_model=self.model_provider.draft_model,
             num_draft_tokens=self.num_draft_tokens,
             prompt_progress_callback=keepalive_callback,
+            processor=self.processor,
+            **mm_prompt,
         ):
             logging.debug(gen_response.text)
 
@@ -838,7 +855,7 @@ class APIHandler(BaseHTTPRequestHandler):
         }
         return response
 
-    def handle_chat_completions(self) -> List[int]:
+    def handle_chat_completions(self) -> Tuple[Union[List[int], str], Optional[Dict[str, Any]]]:
         """
         Handle a chat completion request.
 
@@ -851,8 +868,13 @@ class APIHandler(BaseHTTPRequestHandler):
         # Determine response type
         self.request_id = f"chatcmpl-{uuid.uuid4()}"
         self.object_type = "chat.completion.chunk" if self.stream else "chat.completion"
+        messages = body["messages"]
+        if self.processor is not None:
+            prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+            mm_prompt = self.processor.load_multimodalities(messages)
+            return prompt, mm_prompt
+
         if self.tokenizer.chat_template:
-            messages = body["messages"]
             process_message_content(messages)
             prompt = self.tokenizer.apply_chat_template(
                 messages,
@@ -861,10 +883,9 @@ class APIHandler(BaseHTTPRequestHandler):
                 **self.model_provider.cli_args.chat_template_args,
             )
         else:
-            prompt = convert_chat(body["messages"], body.get("role_mapping"))
+            prompt = convert_chat(messages, body.get("role_mapping"))
             prompt = self.tokenizer.encode(prompt)
-
-        return prompt
+        return prompt, {}
 
     def handle_text_completions(self) -> List[int]:
         """
@@ -877,7 +898,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.request_id = f"cmpl-{uuid.uuid4()}"
         self.object_type = "text_completion"
         assert "prompt" in self.body, "Request did not contain a prompt"
-        return self.tokenizer.encode(self.body["prompt"])
+        return self.tokenizer.encode(self.body["prompt"]), None
 
     def do_GET(self):
         """

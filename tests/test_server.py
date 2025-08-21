@@ -15,7 +15,7 @@ from mlx_lm.utils import load
 class DummyModelProvider:
     def __init__(self, with_draft=False):
         HF_MODEL_PATH = "mlx-community/Qwen1.5-0.5B-Chat-4bit"
-        self.model, self.tokenizer = load(HF_MODEL_PATH)
+        self.model, self.tokenizer, _ = load(HF_MODEL_PATH)
         self.model_key = (HF_MODEL_PATH, None)
 
         # Add draft model support
@@ -41,7 +41,7 @@ class DummyModelProvider:
 
         if with_draft:
             # Use the same model as the draft model for testing
-            self.draft_model, _ = load(HF_MODEL_PATH)
+            self.draft_model, _, _ = load(HF_MODEL_PATH)
             self.draft_model_key = HF_MODEL_PATH
 
     def load(self, model, adapter=None, draft_model=None):

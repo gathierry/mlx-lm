@@ -6,7 +6,7 @@ from mlx_lm import generate, load
 checkpoint = "mistralai/Mistral-7B-Instruct-v0.3"
 
 # Load the corresponding model and tokenizer
-model, tokenizer = load(path_or_hf_repo=checkpoint)
+model, tokenizer, _ = load(path_or_hf_repo=checkpoint)
 
 # Specify the prompt and conversation history
 prompt = "Why is the sky blue?"

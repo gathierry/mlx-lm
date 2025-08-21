@@ -426,8 +426,12 @@ class DeepseekV3Model(nn.Module):
         x: mx.array,
         cache: Optional[Any] = None,
         mask: Optional[mx.array] = None,
+        input_embeddings: Optional[mx.array] = None,
     ) -> mx.array:
-        h = self.embed_tokens(x)
+        if input_embeddings is None:
+            h = self.embed_tokens(x)
+        else:
+            h = input_embeddings
 
         pipeline_rank = self.pipeline_rank
         pipeline_size = self.pipeline_size

@@ -89,7 +89,7 @@ def main():
     if args.seed is not None:
         mx.random.seed(args.seed)
 
-    model, tokenizer = load(
+    model, tokenizer, _ = load(
         args.model,
         adapter_path=args.adapter_path,
         tokenizer_config={
