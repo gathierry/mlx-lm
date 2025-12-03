@@ -10,8 +10,7 @@ from mlx.utils import tree_map_with_path
 
 from .utils import (
     dequantize_model,
-    fetch_from_hub,
-    get_model_path,
+    load,
     quantize_model,
     save,
     upload_to_hub,
@@ -19,10 +18,9 @@ from .utils import (
 
 
 def mixed_quant_predicate_builder(
-    recipe: str, model: nn.Module
+    recipe: str, model: nn.Module, group_size: int = 64
 ) -> Callable[[str, nn.Module, dict], Union[bool, dict]]:
     high_bits = 6
-    group_size = 64
 
     if recipe == "mixed_2_6":
         low_bits = 2
@@ -34,7 +32,7 @@ def mixed_quant_predicate_builder(
     elif recipe == "mixed_4_6":
         low_bits = 4
     else:
-        raise ValueError("Invalid quant recipe {recipe}")
+        raise ValueError(f"Invalid quant recipe {recipe}")
 
     down_keys = [k for k, _ in model.named_modules() if "down_proj" in k]
     if len(down_keys) == 0:
@@ -64,7 +62,9 @@ def mixed_quant_predicate_builder(
             or index >= 7 * num_layers // 8
             or (index - num_layers // 8) % 3 == 2
         )
-        if "v_proj" in path and use_more_bits:
+        if (
+            "v_proj" in path or "v_a_proj" in path or "v_b_proj" in path
+        ) and use_more_bits:
             return {"group_size": group_size, "bits": high_bits}
         if "down_proj" in path and use_more_bits:
             return {"group_size": group_size, "bits": high_bits}
@@ -87,6 +87,7 @@ def convert(
     quantize: bool = False,
     q_group_size: int = 64,
     q_bits: int = 4,
+    q_mode: str = "affine",
     dtype: Optional[str] = None,
     upload_repo: str = None,
     revision: Optional[str] = None,
@@ -107,13 +108,18 @@ def convert(
         )
 
     print("[INFO] Loading")
-    model_path, hf_path = get_model_path(hf_path, revision=revision)
-    model, config, tokenizer = fetch_from_hub(
-        model_path, lazy=True, trust_remote_code=trust_remote_code
+    model, tokenizer, config = load(
+        hf_path,
+        revision=revision,
+        return_config=True,
+        tokenizer_config={"trust_remote_code": trust_remote_code},
+        lazy=True,
     )
 
     if isinstance(quant_predicate, str):
-        quant_predicate = mixed_quant_predicate_builder(quant_predicate, model)
+        quant_predicate = mixed_quant_predicate_builder(
+            quant_predicate, model, q_group_size
+        )
 
     if dtype is None:
         dtype = config.get("torch_dtype", None)
@@ -136,7 +142,12 @@ def convert(
     if quantize:
         print("[INFO] Quantizing")
         model, config = quantize_model(
-            model, config, q_group_size, q_bits, quant_predicate=quant_predicate
+            model,
+            config,
+            q_group_size,
+            q_bits,
+            mode=q_mode,
+            quant_predicate=quant_predicate,
         )
 
     if dequantize:
@@ -147,11 +158,10 @@ def convert(
 
     save(
         mlx_path,
-        model_path,
+        hf_path,
         model,
         tokenizer,
         config,
-        hf_repo=hf_path,
     )
 
     if upload_repo is not None:
@@ -181,6 +191,13 @@ def configure_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--q-bits", help="Bits per weight for quantization.", type=int, default=4
+    )
+    parser.add_argument(
+        "--q-mode",
+        help="The quantization mode.",
+        type=str,
+        default="affine",
+        choices=["affine", "mxfp4"],
     )
     parser.add_argument(
         "--quant-predicate",

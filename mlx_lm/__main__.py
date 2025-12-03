@@ -9,6 +9,7 @@ if __name__ == "__main__":
         "quant.dwq",
         "quant.dynamic_quant",
         "quant.gptq",
+        "benchmark",
         "cache_prompt",
         "chat",
         "convert",
@@ -16,6 +17,7 @@ if __name__ == "__main__":
         "fuse",
         "generate",
         "lora",
+        "perplexity",
         "server",
         "manage",
         "upload",
@@ -23,7 +25,12 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         raise ValueError(f"CLI requires a subcommand in {subcommands}")
     subcommand = sys.argv.pop(1)
-    if subcommand not in subcommands:
+    if subcommand in subcommands:
+        submodule = importlib.import_module(f"mlx_lm.{subcommand}")
+        submodule.main()
+    elif subcommand == "--version":
+        from mlx_lm import __version__
+
+        print(__version__)
+    else:
         raise ValueError(f"CLI requires a subcommand in {subcommands}")
-    submodule = importlib.import_module(f"mlx_lm.{subcommand}")
-    submodule.main()

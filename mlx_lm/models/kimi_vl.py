@@ -32,9 +32,9 @@ class TextArgs(BaseModelArgs):
     topk_method: str = "noaux_tc"
     scoring_func: str = "sigmoid"
     norm_topk_prob: bool = True
-    n_group: Optional[int] = None
-    topk_group: Optional[int] = None
-    num_experts_per_tok: Optional[int] = None
+    n_group: int = 1
+    topk_group: int = 1
+    num_experts_per_tok: int = 1
     moe_layer_freq: int = 1
     first_k_dense_replace: int = 0
     max_position_embeddings: int = 2048
@@ -535,10 +535,9 @@ class LanguageModel(nn.Module):
         self,
         inputs: mx.array,
         cache: Optional[Any] = None,
-        mask: Optional[mx.array] = None,
         input_embeddings: Optional[mx.array] = None,
     ):
-        out = self.model(inputs, cache, mask, input_embeddings=input_embeddings)
+        out = self.model(inputs, cache, input_embeddings=input_embeddings)
         return self.lm_head(out)
 
 
@@ -610,7 +609,6 @@ class Model(nn.Module):
         inputs: mx.array,
         pixel_values: Optional[mx.array] = None,
         cache: Optional[Any] = None,
-        mask: Optional[mx.array] = None,
         **kwargs,
     ):
         inputs_embeds = self.language_model.model.embed_tokens(inputs)
@@ -627,7 +625,6 @@ class Model(nn.Module):
         outputs = self.language_model(
             inputs,
             cache,
-            mask,
             input_embeddings=inputs_embeds,
         )
 

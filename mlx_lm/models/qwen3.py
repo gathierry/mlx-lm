@@ -140,16 +140,17 @@ class Qwen3Model(nn.Module):
     def __call__(
         self,
         inputs: mx.array,
-        mask: mx.array = None,
         cache=None,
+        input_embeddings: Optional[mx.array] = None,
     ):
-        h = self.embed_tokens(inputs)
-
-        if mask is None:
-            mask = create_attention_mask(h, cache)
+        if input_embeddings is not None:
+            h = input_embeddings
+        else:
+            h = self.embed_tokens(inputs)
 
         if cache is None:
             cache = [None] * len(self.layers)
+        mask = create_attention_mask(h, cache[0])
 
         for layer, c in zip(self.layers, cache):
             h = layer(h, mask, c)
@@ -169,10 +170,10 @@ class Model(nn.Module):
     def __call__(
         self,
         inputs: mx.array,
-        mask: mx.array = None,
         cache=None,
+        input_embeddings: Optional[mx.array] = None,
     ):
-        out = self.model(inputs, mask, cache)
+        out = self.model(inputs, cache, input_embeddings)
         if self.args.tie_word_embeddings:
             out = self.model.embed_tokens.as_linear(out)
         else:

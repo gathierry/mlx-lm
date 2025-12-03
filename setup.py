@@ -6,11 +6,11 @@ from pathlib import Path
 from setuptools import setup
 
 package_dir = Path(__file__).parent / "mlx_lm"
-with open("requirements.txt") as fid:
-    requirements = [l.strip() for l in fid.readlines()]
-
 sys.path.append(str(package_dir))
+
 from _version import __version__
+
+MIN_MLX_VERSION = "0.29.2"
 
 setup(
     name="mlx-lm",
@@ -23,13 +23,23 @@ setup(
     author="MLX Contributors",
     url="https://github.com/ml-explore/mlx-lm",
     license="MIT",
-    install_requires=requirements,
+    install_requires=[
+        f"mlx>={MIN_MLX_VERSION}; platform_system == 'Darwin'",
+        "numpy",
+        "transformers>=4.39.3",
+        "sentencepiece",
+        "protobuf",
+        "pyyaml",
+        "jinja2",
+    ],
     packages=["mlx_lm", "mlx_lm.models", "mlx_lm.quant", "mlx_lm.tuner"],
     python_requires=">=3.8",
     extras_require={
         "test": ["datasets", "lm-eval"],
         "train": ["datasets", "tqdm"],
         "evaluate": ["lm-eval", "tqdm"],
+        "cuda": [f"mlx[cuda]>={MIN_MLX_VERSION}"],
+        "cpu": [f"mlx[cpu]>={MIN_MLX_VERSION}"],
     },
     entry_points={
         "console_scripts": [
@@ -37,6 +47,7 @@ setup(
             "mlx_lm.dwq = mlx_lm.quant.dwq:main",
             "mlx_lm.dynamic_quant = mlx_lm.quant.dynamic_quant:main",
             "mlx_lm.gptq = mlx_lm.quant.gptq:main",
+            "mlx_lm.benchmark = mlx_lm.benchmark:main",
             "mlx_lm.cache_prompt = mlx_lm.cache_prompt:main",
             "mlx_lm.chat = mlx_lm.chat:main",
             "mlx_lm.convert = mlx_lm.convert:main",
@@ -44,6 +55,7 @@ setup(
             "mlx_lm.fuse = mlx_lm.fuse:main",
             "mlx_lm.generate = mlx_lm.generate:main",
             "mlx_lm.lora = mlx_lm.lora:main",
+            "mlx_lm.perplexity = mlx_lm.perplexity:main",
             "mlx_lm.server = mlx_lm.server:main",
             "mlx_lm.manage = mlx_lm.manage:main",
             "mlx_lm.upload = mlx_lm.upload:main",

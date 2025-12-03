@@ -5,7 +5,7 @@ import sys
 import unittest
 from contextlib import contextmanager
 from io import StringIO
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -28,13 +28,6 @@ def swapped_with_identity(obj, func):
 
 
 class TestLora(unittest.TestCase):
-    def setUp(self):
-        self.capturedOutput = StringIO()
-        sys.stdout = self.capturedOutput
-
-    def tearDown(self):
-        sys.stdout = sys.__stdout__
-
     def test_llama(self):
         from mlx_lm.models import llama
 
@@ -48,7 +41,6 @@ class TestLora(unittest.TestCase):
             vocab_size=10_000,
             tie_word_embeddings=False,
         )
-
         lora_layers = 4
 
         def check_config(params, expected_trainable_parameters=None):
@@ -68,10 +60,13 @@ class TestLora(unittest.TestCase):
             self.assertEqual(trainable_params, expected_trainable_parameters)
 
         params = {"rank": 8, "dropout": 0.0, "scale": 10.0}
-        check_config(params)
+        nparams = (
+            args.hidden_size * 2 * 4 + (args.intermediate_size + args.hidden_size) * 3
+        ) * lora_layers
+        check_config(params, expected_trainable_parameters=nparams * params["rank"])
 
         params["rank"] = 1
-        check_config(params)
+        check_config(params, expected_trainable_parameters=nparams * params["rank"])
 
         params["keys"] = ["self_attn.k_proj"]
         check_config(params)
@@ -128,7 +123,7 @@ class TestLora(unittest.TestCase):
             embedding.bits,
         )
         lora_emb = LoRAEmbedding.from_base(embedding, r=8, dropout=0, scale=10)
-        new_embedding = lora_emb.fuse(de_quantize=True)
+        new_embedding = lora_emb.fuse(dequantize=True)
         self.assertTrue(mx.array_equal(dequantized_weight, new_embedding.weight))
         self.assertTrue(mx.array_equal(embedding(tokens), lora_emb(tokens)))
 
@@ -142,7 +137,7 @@ class TestLora(unittest.TestCase):
 
         # change the value of lora_b and the embeddings will no longer be equal
         lora_emb.lora_b = mx.random.uniform(shape=lora_emb.lora_b.shape)
-        new_embedding = lora_emb.fuse(de_quantize=True)
+        new_embedding = lora_emb.fuse(dequantize=True)
         self.assertFalse(mx.array_equal(dequantized_weight, new_embedding.weight))
         self.assertFalse(mx.array_equal(embedding(tokens), lora_emb(tokens)))
 
@@ -191,7 +186,7 @@ class TestDora(unittest.TestCase):
 
         dora_layers = 4
 
-        def check_config(params):
+        def check_config(params, expected_params=None):
             n_keys = 2
             if "keys" in params:
                 n_keys = len(params["keys"])
@@ -201,17 +196,29 @@ class TestDora(unittest.TestCase):
             trainable_params = sum(
                 v.size for _, v in tree_flatten(model.trainable_parameters())
             )
-            self.assertEqual(
-                trainable_params,
+            expected_params = expected_params or (
                 dora_layers
-                * (params["rank"] * hidden_size * 2 * n_keys + n_keys * hidden_size),
+                * (params["rank"] * hidden_size * 2 * n_keys + n_keys * hidden_size)
             )
+            self.assertEqual(trainable_params, expected_params)
 
         params = {"rank": 8, "alpha": 16, "dropout": 0.0, "scale": 10.0}
-        check_config(params)
+        nparams = (
+            args.hidden_size * 2 * 4 + (args.intermediate_size + args.hidden_size) * 3
+        )
+        nparams = (
+            nparams * params["rank"] + 5 * args.hidden_size + 2 * args.intermediate_size
+        ) * dora_layers
+        check_config(params, expected_params=nparams)
 
         params["rank"] = 1
-        check_config(params)
+        nparams = (
+            args.hidden_size * 2 * 4 + (args.intermediate_size + args.hidden_size) * 3
+        )
+        nparams = (
+            nparams * params["rank"] + 5 * args.hidden_size + 2 * args.intermediate_size
+        ) * dora_layers
+        check_config(params, expected_params=nparams * params["rank"])
 
         params["keys"] = ["self_attn.k_proj"]
         check_config(params)
@@ -293,7 +300,7 @@ class TestDora(unittest.TestCase):
         quantized_linear = nn.QuantizedLinear(in_dims, out_dims, bias=True)
         dora_quantized_linear = DoRALinear.from_base(quantized_linear, r)
         # Dequantize
-        to_linear_from_quantized = dora_quantized_linear.fuse(de_quantize=True)
+        to_linear_from_quantized = dora_quantized_linear.fuse(dequantize=True)
         self.assertTrue(
             mx.allclose(quantized_linear.bias, to_linear_from_quantized.bias)
         )
@@ -398,6 +405,7 @@ class TestScheduleConfig(unittest.TestCase):
             dataset=mock_dataset,
             batch_size=2,
             max_seq_length=2048,
+            comm_group=ANY,
         )
         self.assertEqual(mock_default_loss.call_count, 2)
 
@@ -434,6 +442,7 @@ class TestScheduleConfig(unittest.TestCase):
             dataset=mock_dataset,
             batch_size=2,
             max_seq_length=2048,
+            comm_group=ANY,
         )
         self.assertEqual(mock_default_loss.call_count, 3)
 

@@ -40,7 +40,7 @@ yaml_loader.add_implicit_resolver(
 )
 
 CONFIG_DEFAULTS = {
-    "model": "mlx_model",
+    "model": "Qwen/Qwen3-0.6b",
     "train": False,
     "fine_tune_type": "lora",
     "optimizer": "adam",
@@ -51,7 +51,7 @@ CONFIG_DEFAULTS = {
         "sgd": {},
         "adafactor": {},
     },
-    "data": "data/",
+    "data": "mlx-community/WikiSQL",
     "seed": 0,
     "num_layers": 16,
     "batch_size": 4,
@@ -68,10 +68,10 @@ CONFIG_DEFAULTS = {
     "max_seq_length": 2048,
     "config": None,
     "grad_checkpoint": False,
+    "grad_accumulation_steps": 1,
     "lr_schedule": None,
     "lora_parameters": {"rank": 8, "dropout": 0.0, "scale": 20.0},
     "mask_prompt": False,
-    "wandb": None,  # will be deprecated in a future release
     "report_to": None,
     "project_name": None,
 }
@@ -143,6 +143,11 @@ def build_parser():
         help="Number of training steps between validations.",
     )
     parser.add_argument(
+        "--grad-accumulation-steps",
+        type=int,
+        help="Number of steps to accumulate before each optimizer update.",
+    )
+    parser.add_argument(
         "--resume-adapter-file",
         type=str,
         help="Load path to resume training from the given fine-tuned weights.",
@@ -184,15 +189,6 @@ def build_parser():
         action="store_true",
         help="Use gradient checkpointing to reduce memory use.",
         default=None,
-    )
-    parser.add_argument(  # will be deprecated in a future release
-        "--wandb",
-        type=str,
-        default=None,
-        help=(
-            "The 'wandb' argument is deprecated and will be removed in a future release. "
-            "Use 'report_to: wandb' and 'project_name' in the configuration instead."
-        ),
     )
     parser.add_argument(
         "--report-to",
@@ -265,6 +261,7 @@ def train_model(
         adapter_file=adapter_file,
         max_seq_length=args.max_seq_length,
         grad_checkpoint=args.grad_checkpoint,
+        grad_accumulation_steps=args.grad_accumulation_steps,
     )
 
     # Initialize the selected optimizer
@@ -314,14 +311,6 @@ def evaluate_model(args, model: nn.Module, test_set):
 
 def run(args, training_callback: TrainingCallback = None):
     np.random.seed(args.seed)
-    if args.wandb is not None:
-        warnings.warn(
-            "The 'wandb' argument is deprecated and will be removed in a future release. "
-            "Use 'report_to: wandb' and 'project_name' in the configuration instead.",
-            DeprecationWarning,
-        )
-        args.report_to = "wandb"
-        args.project_name = args.wandb
     training_callback = get_reporting_callbacks(
         args.report_to,
         project_name=args.project_name,

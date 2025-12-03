@@ -50,7 +50,7 @@ class FusedLoRALinear(nn.Module):
         ]
         self.lora_b = [mx.zeros((r, od)) for od in output_dims]
 
-    def fuse(self, de_quantize: bool = False):
+    def fuse(self, dequantize: bool = False):
         linear = self.linear
         weight = linear.weight
         is_quantized = isinstance(linear, FusedQuantizedLinear)
@@ -79,7 +79,7 @@ class FusedLoRALinear(nn.Module):
         delta = mx.concatenate(deltas, axis=0)
         fused_linear.weight = weight + delta
 
-        if is_quantized and not de_quantize:
+        if is_quantized and not dequantize:
             fused_linear = fused_linear.to_quantized(linear.group_size, linear.bits)
 
         return fused_linear
@@ -350,17 +350,15 @@ class AFMModel(nn.Module):
     def __call__(
         self,
         inputs: mx.array,
-        mask: mx.array = None,
         cache=None,
     ):
         h = self.embedding(inputs)
 
-        if mask is None:
-            mask = create_attention_mask(h, cache)
-
         if cache is None:
             cache = [None] * len(self.layers)
             cache[-1] = ConcatenateKVCache()
+
+        mask = create_attention_mask(h, cache[0])
 
         for layer, c in zip(self.layers, cache):
             h = layer(h, mask, cache=c)
@@ -382,10 +380,9 @@ class Model(nn.Module):
     def __call__(
         self,
         inputs: mx.array,
-        mask: mx.array = None,
         cache=None,
     ):
-        out = self.model(inputs, mask, cache)
+        out = self.model(inputs, cache)
         out = self.model.embedding.as_linear(out)
         return out
 

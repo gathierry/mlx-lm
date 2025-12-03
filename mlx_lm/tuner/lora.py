@@ -31,7 +31,7 @@ class LoRALinear(nn.Module):
         lora_lin.linear = linear
         return lora_lin
 
-    def fuse(self, de_quantize: bool = False):
+    def fuse(self, dequantize: bool = False):
         linear = self.linear
         bias = "bias" in linear
         weight = linear.weight
@@ -57,7 +57,7 @@ class LoRALinear(nn.Module):
         if bias:
             fused_linear.bias = linear.bias
 
-        if is_quantized and not de_quantize:
+        if is_quantized and not dequantize:
             fused_linear = nn.QuantizedLinear.from_linear(
                 fused_linear,
                 linear.group_size,
@@ -119,7 +119,7 @@ class LoRASwitchLinear(nn.Module):
         lora_lin.linear = linear
         return lora_lin
 
-    def fuse(self, de_quantize: bool = False):
+    def fuse(self, dequantize: bool = False):
         linear = self.linear
         bias = "bias" in linear
         weight = linear.weight
@@ -146,7 +146,7 @@ class LoRASwitchLinear(nn.Module):
         if bias:
             fused_linear.bias = linear.bias
 
-        if is_quantized and not de_quantize:
+        if is_quantized and not dequantize:
             fused_linear = fused_linear.to_quantized(linear.group_size, linear.bits)
 
         return fused_linear
@@ -176,19 +176,25 @@ class LoRASwitchLinear(nn.Module):
         self.lora_a = mx.random.uniform(
             low=-scale,
             high=scale,
-            shape=(r * num_experts, input_dims),
+            shape=(num_experts, r, input_dims),
         )
         self.lora_b = mx.zeros(shape=(num_experts, output_dims, r))
         self.num_experts = num_experts
 
-    def __call__(self, x, indices):
-        shape = x.shape[:-3] + (self.num_experts, -1)
-
-        y = self.linear(x, indices)
-        z = (self.dropout(x) @ self.lora_a.T).reshape(shape)
-        z = mx.take_along_axis(z, indices[..., None], axis=-2)
-        z = z[..., None, :] @ self.lora_b[indices].swapaxes(-2, -1)
-
+    def __call__(self, x, indices, sorted_indices=False):
+        y = self.linear(x, indices, sorted_indices=sorted_indices)
+        z = mx.gather_mm(
+            self.dropout(x),
+            self.lora_a.swapaxes(-1, -2),
+            rhs_indices=indices,
+            sorted_indices=sorted_indices,
+        )
+        z = mx.gather_mm(
+            z,
+            self.lora_b.swapaxes(-1, -2),
+            rhs_indices=indices,
+            sorted_indices=sorted_indices,
+        )
         return y + (self.scale * z).astype(x.dtype)
 
 
@@ -213,7 +219,7 @@ class LoRAEmbedding(nn.Module):
         lora_embedding.embedding = embedding
         return lora_embedding
 
-    def fuse(self, de_quantize: bool = False):
+    def fuse(self, dequantize: bool = False):
         embedding = self.embedding
         weight = embedding.weight
         is_quantized = isinstance(embedding, nn.QuantizedEmbedding)
@@ -237,7 +243,7 @@ class LoRAEmbedding(nn.Module):
         lora_b = self.lora_b.astype(dtype)
         fused_embedding.weight = weight + lora_a @ lora_b
 
-        if is_quantized and not de_quantize:
+        if is_quantized and not dequantize:
             fused_embedding = nn.QuantizedEmbedding.from_embedding(
                 fused_embedding,
                 embedding.group_size,
