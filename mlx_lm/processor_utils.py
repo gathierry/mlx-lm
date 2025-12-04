@@ -47,19 +47,17 @@ class ProcessorWrapper:
             images, videos = [], []
             video_metadata = []
             for message in conversation:
-                visuals = [content for content in message["content"] if content["type"] in ["image", "video"]]
-                image_fnames = [
-                    vision_info[key]
-                    for vision_info in visuals
-                    for key in ["image", "url", "path", "base64"]
-                    if key in vision_info and vision_info["type"] == "image"
-                ]
-                video_fnames = [
-                    vision_info[key]
-                    for vision_info in visuals
-                    for key in ["video", "url", "path"]
-                    if key in vision_info and vision_info["type"] == "video"
-                ]
+                image_fnames = []
+                video_fnames = []
+                for content in message["content"]:
+                    if isinstance(content, str):  # text only
+                        continue
+                    else:
+                        assert isinstance(content, dict), f"content is {type(content)}"
+                        if content["type"] == "image_url":
+                            image_fnames.append(content["image_url"]["url"])
+                        elif content["type"] == "video_url":
+                            video_fnames.append(content["video_url"]["url"])
 
                 for fname in image_fnames:
                     images.append(load_image(fname))
@@ -94,11 +92,13 @@ class ProcessorWrapper:
                 batch_videos = batch_videos[0]
                 batch_video_metadata = batch_video_metadata[0]
 
-        return {
-            "images": batch_images,
-            "videos": batch_videos,
-            "video_meta": batch_video_metadata,
-        }
+        ret = {}
+        if len(batch_images):
+            ret["images"] = batch_images
+        if len(batch_videos):
+            ret["videos"] = batch_videos
+            ret["video_meta"] = batch_video_metadata
+        return ret
 
     @staticmethod
     def convert_to_mx_array(np_array_dict):
