@@ -187,3 +187,13 @@ class Model(nn.Module):
     @property
     def layers(self):
         return self.model.layers
+
+    def encode(
+        self,
+        inputs: mx.array,
+        mask: mx.array = None,
+        cache=None,
+    ):
+        out = self.model(inputs, mask, cache)
+        return out
+    

@@ -294,6 +294,7 @@ class APIHandler(BaseHTTPRequestHandler):
             "/v1/completions": self.handle_text_completions,
             "/v1/chat/completions": self.handle_chat_completions,
             "/chat/completions": self.handle_chat_completions,
+            "/embeddings": self.handle_embeddings,
         }
 
         if self.path not in endpoints:
@@ -383,6 +384,11 @@ class APIHandler(BaseHTTPRequestHandler):
             if self.stream
             else self._set_completion_headers(200)
         )
+
+        # embeddings
+        if self.path == "/embeddings":
+            endpoints[self.path]()
+            return
 
         # Call endpoint specific method
         prompt, mm_prompt = endpoints[self.path]()
@@ -854,6 +860,40 @@ class APIHandler(BaseHTTPRequestHandler):
             },
         }
         return response
+
+
+    def handle_embeddings(self):
+        body = self.body
+        prompt = body["input"]
+        input_ids = mx.array([self.tokenizer.encode(prompt)])
+        vectors = self.model.encode(input_ids)[:, -1, :]
+        vectors = vectors / mx.linalg.norm(vectors, axis=1, keepdims=True)
+        vectors_list = vectors.tolist()
+        response = {
+            "object": "list",
+            "data": [
+                {
+                    "object": "embedding",
+                    "embedding": vec,
+                    "index": i
+                } for i, vec in enumerate(vectors_list)
+            ],
+            "model": body["model"],
+            "usage": {
+                "prompt_tokens": len(input_ids),
+                "total_tokens": len(input_ids),
+            }
+        }
+        response_json = json.dumps(response).encode()
+        indent = "\t"  # Backslashes can't be inside of f-strings
+        logging.debug(f"Outgoing Response: {json.dumps(response, indent=indent)}")
+
+        # Send an additional Content-Length header when it is known
+        self.send_header("Content-Length", str(len(response_json)))
+        self.end_headers()
+        self.wfile.write(response_json)
+        self.wfile.flush()
+
 
     def handle_chat_completions(self) -> Tuple[Union[List[int], str], Optional[Dict[str, Any]]]:
         """
