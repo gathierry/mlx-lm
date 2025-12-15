@@ -864,11 +864,15 @@ class APIHandler(BaseHTTPRequestHandler):
 
     def handle_embeddings(self):
         body = self.body
-        prompt = body["input"]
-        input_ids = mx.array([self.tokenizer.encode(prompt)])
-        vectors = self.model.encode(input_ids)[:, -1, :]
-        vectors = vectors / mx.linalg.norm(vectors, axis=1, keepdims=True)
-        vectors_list = vectors.tolist()
+        prompts = body["input"]
+        if not isinstance(prompts, list):
+            prompts = [prompts]
+        vectors_list = []
+        for prompt in prompts:
+            input_ids = mx.array([self.tokenizer.encode(prompt)])
+            vectors = self.model.encode(input_ids)[:, -1, :]
+            vectors = vectors / mx.linalg.norm(vectors, axis=1, keepdims=True)
+            vectors_list.append(vectors[0].tolist())
         response = {
             "object": "list",
             "data": [
